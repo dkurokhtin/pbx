@@ -190,19 +190,19 @@ cmd_deliver() {
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
   archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
 
-  # Windows-путь → WSL
+  # Windows-путь → WSL (для archive)
   if command -v wslpath >/dev/null 2>&1 && [[ "$archive" == *:\\* || "$archive" == *:/* ]]; then
     archive="$(wslpath -u "$archive")"
   fi
-  [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
 
+  load_config "$project"
+  local repo="$REPO"
+
+  [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
   # Проверка конвенции ветки — предупреждаем, но не блокируем
   [[ "$branch" =~ ^(feature|fix|hotfix|bugfix|chore)/ ]] \
     || c_warn "⚠️  Ветка '$branch' не по конвенции feature/PROJ-123-… — продолжаю как есть."
-
-  local repo="$PROJECTS_ROOT/$project"
   [[ -d "$repo/.git" ]] || die "Не git-репозиторий: $repo"
-  load_config "$project"
 
   cd "$repo"
   # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)

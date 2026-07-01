@@ -203,6 +203,42 @@ test_pack_e2e_registry() {
   rm -rf "$base" "$reg"
 }
 
+# --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
+test_deliver_uses_repo() {
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE
+
+  git init -q --bare "$remote"
+  git init -q "$repo"
+  ( cd "$repo" \
+    && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" \
+    && git checkout -q -b dev \
+    && echo old-content > file.txt && git add -A && git commit -q -m init \
+    && git push -q -u origin dev ) >/dev/null 2>&1
+
+  # источник с новым содержимым; архив как делает pack (один корневой каталог)
+  mkdir -p "$src"; echo new > "$src/file.txt"; echo add > "$src/added.txt"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$src" "$repo" > "$reg/proj.conf"
+
+  cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" >/dev/null 2>&1
+  trap - RETURN   # cmd_deliver оставляет RETURN-trap (bash: не функция-локален) — сбрасываем, чтобы не сработал повторно тут
+
+  assert_eq "deliver: файл синкнут в REPO" "$(cat "$repo/file.txt")" "new"
+  assert_has "deliver: added.txt в REPO"   "$(ls "$repo")" "added.txt"
+  local pushed; pushed="$(git -C "$remote" branch --list feature/T-1)"
+  assert_has "deliver: ветка запушена в remote" "$pushed" "feature/T-1"
+  cd "$HERE"   # cmd_deliver сделал cd "$repo" в текущем шелле — вернуться перед rm -rf
+  rm -rf "$base" "$reg"
+}
+test_deliver_uses_repo
+
 # --- Task 5: forge_push -----------------------------------------------------
 test_forge_gitlab() {
   CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="master"
