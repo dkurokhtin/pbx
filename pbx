@@ -368,6 +368,54 @@ EOF
   c_blue  "   SRC=$src — при необходимости отредактируй $f"
 }
 
+# ---- scan ------------------------------------------------------------------
+# Найти репозитории в каталоге и создать записи реестра (REPO или SRC).
+cmd_scan() {
+  local field="" dir="" dry=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --repo)    field="REPO" ;;
+      --src)     field="SRC" ;;
+      --dry-run) dry=1 ;;
+      -*)        die "Неизвестный флаг: $a (ожидается --repo|--src|--dry-run)" ;;
+      *)         dir="$a" ;;
+    esac
+  done
+  [[ -n "$field" ]] || die "Укажи --repo или --src. Использование: pbx scan (--repo|--src) [каталог] [--dry-run]"
+  if [[ -z "$dir" ]]; then
+    [[ "$field" == "REPO" ]] && dir="$PROJECTS_ROOT" || dir="$WORKSPACE"
+  fi
+  [[ -d "$dir" ]] || die "Каталог не найден: $dir"
+  mkdir -p "$PBX_REGISTRY_DIR"
+
+  local drynote=""; [[ "$dry" -eq 1 ]] && drynote="  (dry-run)"
+  c_blue "🔵 Скан $dir → поле $field$drynote"
+
+  local created=0 skipped=0 warned=0 kind name path url f forge
+  while IFS=$'\t' read -r kind name path url; do
+    if [[ "$kind" == "WARN" ]]; then
+      c_warn "  ⚠️  $name: $path"; warned=$((warned+1)); continue
+    fi
+    f="$PBX_REGISTRY_DIR/$name.conf"
+    if [[ -e "$f" ]]; then
+      c_warn "  • $name — пропущено (уже есть)"; skipped=$((skipped+1)); continue
+    fi
+    forge=""
+    [[ "$url" == *github.com* ]] && forge=$'\nFORGE=github'
+    if [[ "$dry" -eq 1 ]]; then
+      c_green "  + $name → $field=$path (dry-run)"
+    else
+      printf '# Реестр pbx (scan): проект %s\n%s=%s%s\n' "$name" "$field" "$path" "$forge" > "$f"
+      c_green "  + $name → $field=$path"
+    fi
+    created=$((created+1))
+  done < <(scan_candidates "$dir")
+
+  c_green "✅ Скан завершён: создано $created, пропущено $skipped, предупреждений $warned"
+  return 0
+}
+
 # ---- help ------------------------------------------------------------------
 cmd_help() {
   cat <<'EOF'
@@ -379,6 +427,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
   pbx ship    <проект> <ветка> <сообщение> [env]  всё сразу: pack → deliver → deploy
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
+  pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
   pbx help                                      эта справка
 
@@ -421,6 +470,7 @@ main() {
     deploy)             require_wsl; cmd_deploy "$@" ;;
     ship)               require_wsl; cmd_ship "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
+    scan)               require_wsl; cmd_scan "$@" ;;
     list|ls)            cmd_list ;;
     help|-h|--help)     cmd_help ;;
     *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;

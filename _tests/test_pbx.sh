@@ -148,6 +148,67 @@ test_list_projects() {
   rm -rf "$ws" "$reg"
 }
 
+# --- pbx scan: команда ------------------------------------------------------
+test_scan_creates_repo_entry() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@gitlab.rt-dc.ru:x/proj.git"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  assert_has "создан proj.conf"  "$(ls "$reg")" "proj.conf"
+  assert_has "REPO записан"       "$(cat "$reg/proj.conf")" "REPO=$ws/proj"
+  assert_no  "без FORGE (gitlab)" "$(cat "$reg/proj.conf")" "FORGE="
+  rm -rf "$ws" "$reg"
+}
+test_scan_github_forge() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/gh" "git@github.com:me/gh.git"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  assert_has "FORGE=github" "$(cat "$reg/gh.conf")" "FORGE=github"
+  rm -rf "$ws" "$reg"
+}
+test_scan_container_entry() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_container "$ws/vnd"; mk_repo "$ws/vnd/vnd_frontend" "git@gitlab.rt-dc.ru:suba/vnd_frontend.git"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  assert_has "vnd.conf → внутренний путь" "$(cat "$reg/vnd.conf")" "REPO=$ws/vnd/vnd_frontend"
+  rm -rf "$ws" "$reg"
+}
+test_scan_skip_existing() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  printf 'REPO=/custom\n' > "$reg/proj.conf"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  assert_has "существующий не тронут" "$(cat "$reg/proj.conf")" "REPO=/custom"
+  rm -rf "$ws" "$reg"
+}
+test_scan_dry_run() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  cmd_scan --repo --dry-run "$ws" >/dev/null 2>&1
+  assert_eq "dry-run: файл не создан" "$(ls "$reg")" ""
+  rm -rf "$ws" "$reg"
+}
+test_scan_requires_flag() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local rc=0; ( cmd_scan "$ws" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "без --repo/--src → ошибка" "$rc" "1"
+  rm -rf "$ws" "$reg"
+}
+test_scan_src_field() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  cmd_scan --src "$ws" >/dev/null 2>&1
+  assert_has "SRC записан" "$(cat "$reg/proj.conf")" "SRC=$ws/proj"
+  rm -rf "$ws" "$reg"
+}
+
+test_scan_creates_repo_entry
+test_scan_github_forge
+test_scan_container_entry
+test_scan_skip_existing
+test_scan_dry_run
+test_scan_requires_flag
+test_scan_src_field
+
 # --- Task 4: list_projects объединение + valid_project ----------------------
 test_list_union() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
