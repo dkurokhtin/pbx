@@ -284,6 +284,40 @@ test_forge_none() {
   rm -f "$CALLS"
 }
 
+# --- Task 5: pbx add --------------------------------------------------------
+test_add_creates_entry() {
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local src; src="$(make_ws)"
+  cmd_add "myproj" "$src" >/dev/null 2>&1
+  assert_has "add: файл создан" "$(ls "$reg")" "myproj.conf"
+  assert_has "add: SRC записан"  "$(cat "$reg/myproj.conf")" "SRC=$src"
+  rm -rf "$reg" "$src"
+}
+test_add_refuses_overwrite() {
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local src; src="$(make_ws)"
+  printf 'SRC=old\n' > "$reg/myproj.conf"
+  local rc=0
+  ( cmd_add "myproj" "$src" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "add: не перезаписывает (ненулевой код)" "$rc" "1"
+  assert_has "add: старое содержимое цело" "$(cat "$reg/myproj.conf")" "SRC=old"
+  rm -rf "$reg" "$src"
+}
+
+test_valid_project_registry_elsewhere() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"           # WORKSPACE пуст
+  local src; src="$(make_ws)"                          # SRC вне WORKSPACE
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\n' "$src" > "$reg/elsewhere.conf"     # проект только в реестре; $WORKSPACE/elsewhere НЕ существует
+  local rc=0
+  ( valid_project "elsewhere" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "valid_project принимает реестровый проект вне WORKSPACE" "$rc" "0"
+  local rc2=0
+  ( valid_project "nonexistent-xyz" ) >/dev/null 2>&1 || rc2=$?
+  assert_eq "valid_project отвергает неизвестный проект" "$rc2" "1"
+  rm -rf "$ws" "$src" "$reg"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
@@ -302,6 +336,9 @@ test_exclude_builders_errexit_safe
 test_pack_e2e
 test_pack_e2e_registry
 test_deliver_uses_repo
+test_add_creates_entry
+test_add_refuses_overwrite
+test_valid_project_registry_elsewhere
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }
