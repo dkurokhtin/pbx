@@ -112,18 +112,17 @@ cmd_list() {
 }
 
 # ---- exclude builders (pack/deliver) ---------------------------------------
-# Аргументы --exclude для tar (пути относительно WORKSPACE → с префиксом проекта).
+# Аргументы --exclude для tar. GNU tar не якорит паттерны → имя без пути
+# исключает совпадения на любой глубине (node_modules в sup-frontend/ и т.п.).
 pack_exclude_args() {
-  local project="$1" e
-  local base=( ".git" ".venv" "node_modules" "front/node_modules" \
-               ".claude" "CLAUDE.md" ".pbx.conf" )
-  for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$project/$e"; done
-  printf -- '--exclude=%s\n' '*/__pycache__'
+  local e
+  local base=( node_modules .git .venv __pycache__ .claude CLAUDE.md .pbx.conf )
+  for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$e"; done
   printf -- '--exclude=%s\n' '*.pyc'
   for e in "${EXTRA_PACK_EXCLUDES[@]:-}"; do
-    [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$project/$e"
+    [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$e"
   done
-  return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
+  return 0
 }
 
 # Аргументы --exclude для rsync (относительно корня переноса).
@@ -145,12 +144,13 @@ cmd_pack() {
   local project; project="$(strip_cr "${1:?Использование: pbx pack <проект>}")"
   valid_project "$project"
   load_config "$project"
+  [[ -d "$SRC" ]] || die "Нет исходников: $SRC"
   mkdir -p "$DIST_DIR"
   local out="$DIST_DIR/$project.tar.gz"
 
-  c_blue "🔵 Упаковка $project → $out"
-  local excludes; mapfile -t excludes < <(pack_exclude_args "$project")
-  tar -C "$WORKSPACE" "${excludes[@]}" -czf "$out" "$project"
+  c_blue "🔵 Упаковка $project ($SRC) → $out"
+  local excludes; mapfile -t excludes < <(pack_exclude_args)
+  tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
   c_green "✅ Архив готов: $out"
   PBX_LAST_ARCHIVE="$out"   # для ship

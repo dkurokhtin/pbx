@@ -133,18 +133,20 @@ test_list_projects() {
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
-  local out; out="$(pack_exclude_args "proj")"
-  assert_has "pack: базовый .git"       "$out" "--exclude=proj/.git"
-  assert_has "pack: node_modules"       "$out" "--exclude=proj/node_modules"
-  assert_has "pack: .pbx.conf исключён" "$out" "--exclude=proj/.pbx.conf"
+  local out; out="$(pack_exclude_args)"
+  assert_has "pack: node_modules"       "$out" "--exclude=node_modules"
+  assert_has "pack: .git"               "$out" "--exclude=.git"
+  assert_has "pack: .pbx.conf исключён" "$out" "--exclude=.pbx.conf"
   assert_has "pack: pyc"                "$out" "--exclude=*.pyc"
-  assert_has "pack: extra dist"         "$out" "--exclude=proj/dist"
-  assert_has "pack: extra coverage"     "$out" "--exclude=proj/coverage"
+  assert_has "pack: extra dist"         "$out" "--exclude=dist"
+  assert_has "pack: extra coverage"     "$out" "--exclude=coverage"
+  assert_no  "pack: без префикса имени" "$out" "--exclude=proj/"
+  EXTRA_PACK_EXCLUDES=()
 }
 test_pack_excludes_empty() {
   EXTRA_PACK_EXCLUDES=()
-  local out; out="$(pack_exclude_args "proj")"
-  assert_has "pack(empty): базовый .git" "$out" "--exclude=proj/.git"
+  local out; out="$(pack_exclude_args)"
+  assert_has "pack(empty): node_modules" "$out" "--exclude=node_modules"
 }
 test_sync_excludes() {
   EXTRA_SYNC_EXCLUDES=("build")
@@ -157,7 +159,7 @@ test_sync_excludes() {
 
 test_exclude_builders_errexit_safe() {
   local out
-  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=(); a="$(pack_exclude_args proj)"; b="$(sync_exclude_args)"; echo REACHED' 2>&1)"
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=(); a="$(pack_exclude_args)"; b="$(sync_exclude_args)"; echo REACHED' 2>&1)"
   assert_eq "билдеры excludes не падают под set -e (пустые массивы)" "$out" "REACHED"
 }
 
@@ -179,6 +181,26 @@ test_pack_e2e() {
   assert_no  "e2e: нет .pbx.conf"        "$list" "proj/.pbx.conf"
   assert_no  "e2e: нет extra secret"     "$list" "proj/secret"
   rm -rf "$ws"
+}
+
+test_pack_e2e_registry() {
+  local base; base="$(make_ws)"
+  local src="$base/sup"; local reg; reg="$(make_ws)"
+  WORKSPACE="$base"; PBX_REGISTRY_DIR="$reg"; DIST_DIR="$base/_dist"
+  unset PBX_TARGET_BRANCH PBX_FORGE
+  mkdir -p "$src/sup-frontend/src" "$src/sup-frontend/node_modules" "$src/.git"
+  echo "app"  > "$src/sup-frontend/src/app.js"
+  echo "junk" > "$src/sup-frontend/node_modules/x.js"
+  echo "g"    > "$src/.git/config"
+  printf 'SRC=%s\n' "$src" > "$reg/sup.conf"
+
+  cmd_pack "sup" >/dev/null 2>&1
+
+  local list; list="$(tar -tzf "$base/_dist/sup.tar.gz")"
+  assert_has "e2e-reg: есть sup-frontend/src/app.js" "$list" "sup/sup-frontend/src/app.js"
+  assert_no  "e2e-reg: нет вложенного node_modules"  "$list" "node_modules"
+  assert_no  "e2e-reg: нет .git"                     "$list" "sup/.git"
+  rm -rf "$base" "$reg"
 }
 
 # --- Task 5: forge_push -----------------------------------------------------
@@ -226,6 +248,7 @@ test_pack_excludes_empty
 test_sync_excludes
 test_exclude_builders_errexit_safe
 test_pack_e2e
+test_pack_e2e_registry
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }
