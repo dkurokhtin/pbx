@@ -130,6 +130,22 @@ test_list_projects() {
   rm -rf "$ws"
 }
 
+# --- Task 4: list_projects объединение + valid_project ----------------------
+test_list_union() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_IGNORE_DIRS
+  mkdir -p "$ws/ws-proj" "$ws/_dist" "$ws/docs"
+  : > "$reg/reg-proj.conf"; : > "$reg/ws-proj.conf"   # ws-proj есть и там, и там → без дублей
+  local out; out="$(list_projects)"
+  assert_has "union: реестровый reg-proj" "$out" "reg-proj"
+  assert_has "union: workspace ws-proj"   "$out" "ws-proj"
+  assert_no  "union: нет _dist"           "$out" "_dist"
+  assert_no  "union: нет docs"            "$out" "docs"
+  assert_eq  "union: ws-proj без дублей"  "$(echo "$out" | grep -c '^ws-proj$')" "1"
+  rm -rf "$ws" "$reg"
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -279,6 +295,7 @@ test_registry_src_repo
 test_registry_fallback
 test_registry_crlf
 test_list_projects
+test_list_union
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
