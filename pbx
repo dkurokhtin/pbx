@@ -97,7 +97,7 @@ valid_project() {
 # URL remote (origin, иначе первый) если <dir> — git-репо с remote; иначе пусто.
 repo_remote_url() {
   local dir="$1" url first
-  [[ -d "$dir/.git" ]] || return 0
+  [[ -e "$dir/.git" ]] || return 0
   url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)"
   if [[ -z "$url" ]]; then
     first="$(git -C "$dir" remote 2>/dev/null | head -1 || true)"
@@ -117,7 +117,8 @@ scan_candidates() {
     d="${d%/}"
     name="$(basename "$d")"
     [[ "$name" == _* || "$name" == .* ]] && continue
-    [[ -d "$d/.git" ]] || continue
+    [[ "$name" == *$'\t'* || "$name" == *$'\n'* ]] && continue
+    [[ -e "$d/.git" ]] || continue
     url="$(repo_remote_url "$d")"
     if [[ -n "$url" ]]; then
       printf 'OK\t%s\t%s\t%s\n' "$name" "$d" "$url"
@@ -128,7 +129,7 @@ scan_candidates() {
     for inner in "$d"/*/; do
       [[ -d "$inner" ]] || continue
       inner="${inner%/}"
-      [[ -d "$inner/.git" ]] || continue
+      [[ -e "$inner/.git" ]] || continue
       [[ -n "$(repo_remote_url "$inner")" ]] || continue
       cnt=$((cnt+1)); only="$inner"
     done
@@ -371,15 +372,15 @@ EOF
 # ---- scan ------------------------------------------------------------------
 # Найти репозитории в каталоге и создать записи реестра (REPO или SRC).
 cmd_scan() {
-  local field="" dir="" dry=0 a
+  local field="" dir="" dry=0 a dirset=0
   for a in "$@"; do
     a="$(strip_cr "$a")"
     case "$a" in
-      --repo)    field="REPO" ;;
-      --src)     field="SRC" ;;
+      --repo) [[ -n "$field" && "$field" != "REPO" ]] && die "Укажи только один из --repo/--src"; field="REPO" ;;
+      --src)  [[ -n "$field" && "$field" != "SRC"  ]] && die "Укажи только один из --repo/--src"; field="SRC" ;;
       --dry-run) dry=1 ;;
-      -*)        die "Неизвестный флаг: $a (ожидается --repo|--src|--dry-run)" ;;
-      *)         dir="$a" ;;
+      -*) die "Неизвестный флаг: $a (ожидается --repo|--src|--dry-run)" ;;
+      *) [[ "$dirset" -eq 1 ]] && die "Лишний аргумент: $a (каталог указывается один)"; dir="$a"; dirset=1 ;;
     esac
   done
   [[ -n "$field" ]] || die "Укажи --repo или --src. Использование: pbx scan (--repo|--src) [каталог] [--dry-run]"
@@ -387,7 +388,7 @@ cmd_scan() {
     [[ "$field" == "REPO" ]] && dir="$PROJECTS_ROOT" || dir="$WORKSPACE"
   fi
   [[ -d "$dir" ]] || die "Каталог не найден: $dir"
-  mkdir -p "$PBX_REGISTRY_DIR"
+  [[ "$dry" -eq 1 ]] || mkdir -p "$PBX_REGISTRY_DIR"
 
   local drynote=""; [[ "$dry" -eq 1 ]] && drynote="  (dry-run)"
   c_blue "🔵 Скан $dir → поле $field$drynote"
@@ -402,7 +403,7 @@ cmd_scan() {
       c_warn "  • $name — пропущено (уже есть)"; skipped=$((skipped+1)); continue
     fi
     forge=""
-    [[ "$url" == *github.com* ]] && forge=$'\nFORGE=github'
+    [[ "$url" == *"@github.com:"* || "$url" == *"//github.com/"* ]] && forge=$'\nFORGE=github'
     if [[ "$dry" -eq 1 ]]; then
       c_green "  + $name → $field=$path (dry-run)"
     else

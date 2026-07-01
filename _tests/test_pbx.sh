@@ -200,14 +200,55 @@ test_scan_src_field() {
   assert_has "SRC записан" "$(cat "$reg/proj.conf")" "SRC=$ws/proj"
   rm -rf "$ws" "$reg"
 }
-
-test_scan_creates_repo_entry
-test_scan_github_forge
-test_scan_container_entry
-test_scan_skip_existing
-test_scan_dry_run
-test_scan_requires_flag
-test_scan_src_field
+test_scan_both_flags_die() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local rc=0; ( cmd_scan --repo --src "$ws" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "оба флага → die" "$rc" "1"
+  rm -rf "$ws" "$reg"
+}
+test_scan_unknown_dir_die() {
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local rc=0; ( cmd_scan --repo "/nonexistent-xyz-$$" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "неизвестный каталог → die" "$rc" "1"
+  rm -rf "$reg"
+}
+test_scan_default_dir_src() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  cmd_scan --src >/dev/null 2>&1     # без каталога → берёт $WORKSPACE
+  assert_has "дефолтный каталог = WORKSPACE" "$(cat "$reg/proj.conf")" "SRC=$ws/proj"
+  rm -rf "$ws" "$reg"
+}
+test_scan_dry_run_no_regdir() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)/nested"; PBX_REGISTRY_DIR="$reg"  # ещё не существует
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  local out; out="$(cmd_scan --repo --dry-run "$ws" 2>&1)"
+  assert_has "dry-run печатает план" "$out" "proj"
+  [[ -d "$reg" ]] && bad "dry-run создал каталог реестра" || ok "dry-run не создал каталог реестра"
+  rm -rf "$ws" "$(dirname "$reg")"
+}
+test_scan_container_cmd_warn() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_container "$ws/c"; mk_repo "$ws/c/a" "git@h:/a.git"; mk_repo "$ws/c/b" "git@h:/b.git"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  [[ -e "$reg/c.conf" ]] && bad "неоднозначный контейнер не должен создавать .conf" || ok "неоднозначный контейнер: .conf не создан"
+  rm -rf "$ws" "$reg"
+}
+test_scan_then_list() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  cmd_scan --repo "$ws" >/dev/null 2>&1
+  assert_has "pbx list видит scan-проект" "$(list_projects)" "proj"
+  rm -rf "$ws" "$WORKSPACE" "$reg"
+}
+test_scan_errexit_safe() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"
+  git init -q "$ws/p"; git -C "$ws/p" remote add origin git@h:/p.git
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; PBX_REGISTRY_DIR="'"$reg"'"; cmd_scan --repo "'"$ws"'" >/dev/null; echo REACHED' 2>&1)"
+  assert_eq "cmd_scan не падает под set -e" "$out" "REACHED"
+  rm -rf "$ws" "$reg"
+}
 
 # --- Task 4: list_projects объединение + valid_project ----------------------
 test_list_union() {
@@ -447,6 +488,20 @@ test_scan_whole_repo
 test_scan_container_one
 test_scan_container_multi
 test_scan_skips_nongit_and_noremote
+test_scan_creates_repo_entry
+test_scan_github_forge
+test_scan_container_entry
+test_scan_skip_existing
+test_scan_dry_run
+test_scan_requires_flag
+test_scan_src_field
+test_scan_both_flags_die
+test_scan_unknown_dir_die
+test_scan_default_dir_src
+test_scan_dry_run_no_regdir
+test_scan_container_cmd_warn
+test_scan_then_list
+test_scan_errexit_safe
 test_defaults
 test_project_over_global
 test_env_wins
