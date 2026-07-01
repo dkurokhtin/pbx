@@ -70,11 +70,26 @@ test_load_config_errexit_safe() {
   rm -rf "$ws"
 }
 
+# --- Task 3: list_projects --------------------------------------------------
+test_list_projects() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  unset PBX_IGNORE_DIRS
+  mkdir -p "$ws/proj-a" "$ws/proj-b" "$ws/_dist" "$ws/docs" "$ws/.hidden"
+  local out; out="$(list_projects)"
+  assert_has "list: есть proj-a" "$out" "proj-a"
+  assert_has "list: есть proj-b" "$out" "proj-b"
+  assert_no  "list: нет _dist"   "$out" "_dist"
+  assert_no  "list: нет docs"    "$out" "docs"
+  assert_no  "list: нет .hidden" "$out" ".hidden"
+  rm -rf "$ws"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
 test_env_wins
 test_load_config_errexit_safe
+test_list_projects
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]

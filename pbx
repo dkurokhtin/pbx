@@ -12,9 +12,10 @@
 #    pbx deliver <проект> <ветка> <сообщение> [архив]
 #    pbx deploy  <проект> [env]
 #    pbx ship    <проект> <ветка> <сообщение> [env]
+#    pbx list
 #    pbx help
 #
-#  Проекты: bot-support-cleaning | smartapp-parking
+#  Проекты: см. pbx list
 # =============================================================================
 set -euo pipefail
 
@@ -73,7 +74,29 @@ require_wsl() {
 
 valid_project() {
   local p="$1"
-  [[ -d "$WORKSPACE/$p" ]] || die "Нет папки проекта: $WORKSPACE/$p"
+  [[ -d "$WORKSPACE/$p" ]] && return 0
+  c_red "❌ Нет папки проекта: $WORKSPACE/$p"
+  c_warn "   Доступные: $(list_projects | paste -sd', ' -)"
+  exit 1
+}
+
+# Проекты = подкаталоги WORKSPACE, кроме служебных (_*, .*, PBX_IGNORE_DIRS).
+list_projects() {
+  local ignore=" ${PBX_IGNORE_DIRS:-docs} " d name
+  for d in "$WORKSPACE"/*/; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    [[ "$name" == _* || "$name" == .* ]] && continue
+    [[ "$ignore" == *" $name "* ]] && continue
+    printf '%s\n' "$name"
+  done | sort
+}
+
+cmd_list() {
+  c_blue "🔵 Проекты в $WORKSPACE:"
+  local any=0 p
+  while IFS= read -r p; do c_green "  • $p"; any=1; done < <(list_projects)
+  [[ "$any" -eq 1 ]] || c_warn "  (проектов не найдено)"
 }
 
 # ---- pack ------------------------------------------------------------------
@@ -218,9 +241,10 @@ pbx — доставка проектов Pybotx (WSL)
                                                 распаковать в репо, ветка от dev, MR в master
   pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
   pbx ship    <проект> <ветка> <сообщение> [env]  всё сразу: pack → deliver → deploy
+  pbx list                                      показать проекты в WORKSPACE
   pbx help                                      эта справка
 
-Проекты: bot-support-cleaning | smartapp-parking
+Проекты: см. `pbx list`
 
 Примеры:
   pbx pack smartapp-parking
@@ -243,6 +267,7 @@ main() {
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     deploy)             require_wsl; cmd_deploy "$@" ;;
     ship)               require_wsl; cmd_ship "$@" ;;
+    list|ls)            cmd_list ;;
     help|-h|--help)     cmd_help ;;
     *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;
   esac
