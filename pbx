@@ -245,6 +245,7 @@ cmd_deliver() {
 cmd_deploy() {
   local project env
   project="$(strip_cr "${1:?Использование: pbx deploy <проект> [env]}")"
+  load_config "$project"
   env="$(strip_cr "${2:-$DEFAULT_ENV}")"
 
   local scripts="$PROJECTS_ROOT/$project/scripts"
@@ -260,6 +261,7 @@ cmd_deploy() {
 cmd_ship() {
   local project branch msg env
   project="$(strip_cr "${1:?Использование: pbx ship <проект> <ветка> <сообщение> [env]}")"
+  load_config "$project"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
   env="$(strip_cr "${4:-$DEFAULT_ENV}")"
@@ -287,15 +289,24 @@ pbx — доставка проектов Pybotx (WSL)
 Проекты: см. `pbx list`
 
 Примеры:
-  pbx pack smartapp-parking
-  pbx deliver smartapp-parking feature/SUBA-2147-fix-parking "Починить бронь парковки"
-  pbx deploy smartapp-parking test
-  pbx ship bot-support-cleaning feature/SUBA-2147-office-filter "Добавить фильтр офисов" dev
+  pbx pack <проект>
+  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание изменений"
+  pbx deploy <проект> test
+  pbx ship <проект> feature/SUBA-2147-new-feature "Описание изменений" dev
 
 Переопределяемые переменные окружения:
   PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
   PBX_TARGET_BRANCH (=master)  PBX_DEFAULT_ENV (=dev)
+
+Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
+  BASE_BRANCH=dev            от какой ветки ответвляемся
+  TARGET_BRANCH=master       куда MR/PR
+  DEFAULT_ENV=dev            окружение деплоя
+  FORGE=gitlab               gitlab | github | none
+  EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
+  EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка
+  Слои: дефолт → $WORKSPACE/.pbx.conf → проектный → env PBX_* (env побеждает).
 EOF
 }
 

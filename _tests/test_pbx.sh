@@ -115,6 +115,26 @@ test_exclude_builders_errexit_safe() {
   assert_eq "билдеры excludes не падают под set -e (пустые массивы)" "$out" "REACHED"
 }
 
+# --- Task 6: e2e pack -------------------------------------------------------
+test_pack_e2e() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  unset PBX_TARGET_BRANCH PBX_FORGE
+  mkdir -p "$ws/proj/src" "$ws/proj/node_modules"
+  echo "print('hi')" > "$ws/proj/src/app.py"
+  echo "junk"        > "$ws/proj/node_modules/x.js"
+  printf 'TARGET_BRANCH=dev\nEXTRA_PACK_EXCLUDES=("secret")\n' > "$ws/proj/.pbx.conf"
+  mkdir -p "$ws/proj/secret"; echo "s" > "$ws/proj/secret/k.txt"
+
+  cmd_pack "proj" >/dev/null 2>&1
+
+  local list; list="$(tar -tzf "$ws/_dist/proj.tar.gz")"
+  assert_has "e2e: есть src/app.py"      "$list" "proj/src/app.py"
+  assert_no  "e2e: нет node_modules"     "$list" "proj/node_modules"
+  assert_no  "e2e: нет .pbx.conf"        "$list" "proj/.pbx.conf"
+  assert_no  "e2e: нет extra secret"     "$list" "proj/secret"
+  rm -rf "$ws"
+}
+
 # --- Task 5: forge_push -----------------------------------------------------
 test_forge_gitlab() {
   CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="master"
@@ -155,6 +175,7 @@ test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
 test_exclude_builders_errexit_safe
+test_pack_e2e
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

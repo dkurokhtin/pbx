@@ -1,0 +1,11 @@
+# Пример .pbx.conf — положи как <проект>/.pbx.conf (не коммитится, исключён из pack).
+# Любой ключ необязателен; незаданное берётся из дефолтов/глобального конфига.
+
+BASE_BRANCH=dev          # от какой ветки ответвляемся
+TARGET_BRANCH=dev        # куда нацелен MR/PR (например, parking → dev)
+DEFAULT_ENV=test         # окружение деплоя по умолчанию
+FORGE=gitlab             # gitlab | github | none
+
+# Доп. исключения (добавляются к встроенным .git/.venv/node_modules/.claude/…):
+EXTRA_PACK_EXCLUDES=("dist" "coverage")
+EXTRA_SYNC_EXCLUDES=("build")
