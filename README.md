@@ -1,61 +1,56 @@
-# Pybotx — рабочее пространство
+# pbx — CLI доставки проектов
 
-Окружение для разработки eXpress-ботов и SmartApp'ов команды rt-dc на едином стеке
-(FastAPI + pybotx + SQLModel + Svelte 5).
+Единый bash-инструмент: упаковать проект, доставить архив в git-репозиторий и
+создать MR/PR. Один и тот же `pbx` работает на обеих машинах: разработка и `pack`
+на рабочей машине, `deliver` — там, где лежит git-репозиторий и есть доступ к
+git-хосту. Копирование архива между машинами — вручную (scp/общая папка).
 
-## Главный принцип
+## Команды
 
-**Контекст для агента ≠ код проекта.**
+    pbx add     <имя> [путь]                       завести проект в реестр (SRC=путь|$PWD)
+    pbx list                                        показать проекты (реестр ∪ WORKSPACE)
+    pbx pack    <имя>                               упаковать SRC в _dist/<имя>.tar.gz
+    pbx deliver <имя> <ветка> <сообщение> [архив]   распаковать в REPO, ветка, коммит, MR/PR
+    pbx deploy  <имя> [env]                         делегирует scripts/deploy.sh проекта
+    pbx ship    <имя> <ветка> <сообщение> [env]     pack → deliver → deploy
+    pbx help
 
-- Скиллы (pybotx, дизайн-система, конвенции) лежат в `Pybotx/.claude/skills/` — это
-  **контекст для агента**, общий для всех проектов. В git-репозитории проектов он **НЕ
-  коммитится** (под скиллы/дизайн есть отдельные репы).
-- Папки проектов (`bot-support-cleaning/`, `smartapp-parking/`) — это **чистые
-  репозитории**, как в GitLab. В доставку едет **только код**.
+## Реестр проектов
 
-## Структура
+Проекты описываются в `$PBX_REGISTRY_DIR` (дефолт `~/.config/pbx/projects/`),
+один файл `<имя>.conf` на проект — свой на каждой машине:
 
-```
-Pybotx/
-├── .claude/skills/            ← скиллы-контекст (НЕ коммитятся в репы)
-│   ├── pybotx/                  справочник pybotx / fsm / smartapp-rpc / sdk + BotX API
-│   ├── smartapps-ui/            UI-гайд фронтенда (Svelte 5, Skeleton, дизайн-токены)
-│   └── team-conventions/        процесс, стек, стиль кода, доступы/админка (Kottster)
-├── bot-support-cleaning/      ← чистый репозиторий бота (== GitLab)
-├── smartapp-parking/          ← репозиторий SmartApp (== GitLab + текущие правки)
-├── _dist/                     ← архивы для доставки (только код)
-├── _source/                   ← исходники/референсы (архивы, workflow, дизайн, _trash)
-├── update.sh                  ← доставка в GitLab (ветка от dev → MR в master)
-└── pack.sh                    ← упаковка проекта в архив (контекст .claude исключается)
-```
+    SRC=/home/me/sup          # что паковать на ЭТОЙ машине (корень репо)
+    REPO=/root/sup            # куда доставлять (иначе $PROJECTS_ROOT/<имя>)
+    TARGET_BRANCH=dev         # + BASE_BRANCH / DEFAULT_ENV / FORGE / EXTRA_*
 
-## Как работать
+Если проекта нет в реестре — fallback: `SRC=$WORKSPACE/<имя>`, `REPO=$PROJECTS_ROOT/<имя>`.
 
-Открываешь проект (`bot-support-cleaning/` или `smartapp-parking/`) и ведёшь разработку.
-Скиллы из `Pybotx/.claude/skills/` подхватываются автоматически и дают агенту контекст по
-стеку и конвенциям. В сами репозитории проектов скиллы/доки-контекст не попадают.
+## Слои настроек (побеждает верхний)
 
-## Доставка изменений в GitLab
+    встроенные дефолты → $WORKSPACE/.pbx.conf → реестр <имя>.conf → <SRC>/.pbx.conf → env PBX_*
 
-`pack.sh` собирает архив проекта (без `.claude/`, `node_modules`, `.git`, `__pycache__`),
-`update.sh` синхронизирует его в git-репозиторий (`PROJECTS_ROOT=/root`), создаёт ветку от
-`dev`, коммитит и пушит MR в `master` (исключая `.git/` и `.gitlab-ci.yml`).
+## Переменные окружения
 
-Сигнатура: `./update.sh <проект> <архив> <ветка> <сообщение-коммита>`.
-Ветка — по конвенции `feature/PROJ-123-short-description`, коммит — кратко и по делу.
+    PBX_WORKSPACE  PBX_PROJECTS_ROOT  PBX_DIST_DIR  PBX_REGISTRY_DIR
+    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_DEFAULT_ENV  PBX_FORGE  PBX_IGNORE_DIRS
 
-```bash
-# 1) упаковать проект в архив (только код)
-./pack.sh smartapp-parking
-#    → _dist/smartapp-parking.tar.gz
+## Рабочий процесс (двухмашинный)
 
-# 2) доставить (на рабочем ноуте в WSL, репозиторий в /root)
-cp /mnt/c/Users/darkl/Claude/Projects/Pybotx/_dist/smartapp-parking.tar.gz /root/
-./update.sh smartapp-parking /root/smartapp-parking.tar.gz \
-    feature/PARK-123-admin-roles-server-defaults \
-    "Добавить server-default для admin_roles (id, granted_at, granted_by_huid)"
-```
+    # рабочая машина
+    pbx add sup /home/me/sup
+    pbx pack sup                       # → _dist/sup.tar.gz (без node_modules/.git)
+    scp _dist/sup.tar.gz work:/root/_dist/
 
-> В GitLab уходит только код проекта. Скиллы и любой агент-контекст (`.claude/`) в
-> доставку не включаются. Разовая настройка git на ноуте при «dubious ownership»:
-> `git config --global --add safe.directory /root/<project>`.
+    # машина с репозиторием
+    pbx deliver sup feature/PROJ-123-fix "Починить X"
+
+## FORGE
+
+`gitlab` (push -o merge_request.*), `github` (`gh pr create`), `none` (просто push).
+
+## Тесты
+
+    bash _tests/test_pbx.sh
+
+Пример конфига — `docs/superpowers/pbx.conf.example`.

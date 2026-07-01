@@ -353,7 +353,7 @@ pbx — доставка проектов Pybotx (WSL)
   FORGE=gitlab               gitlab | github | none
   EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
   EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка
-  Слои: дефолт → $WORKSPACE/.pbx.conf → проектный → env PBX_* (env побеждает).
+  Слои: дефолт → $WORKSPACE/.pbx.conf → реестр <имя>.conf → проектный <SRC>/.pbx.conf → env PBX_* (env побеждает).
 
 Реестр проектов ($PBX_REGISTRY_DIR, свой на каждой машине):
   <имя>.conf: SRC=<путь к исходникам здесь>   REPO=<git-репо для deliver>
