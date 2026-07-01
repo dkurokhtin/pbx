@@ -58,6 +58,7 @@ load_config() {
     source "$PBX_REGISTRY_DIR/$project.conf"
   # 4) в-проекте (SRC уже мог задаться реестром; иначе WORKSPACE/<имя>)
   local src_guess="${SRC:-$WORKSPACE/$project}"
+  src_guess="${src_guess//$'\r'/}"
   [[ -n "$project" && -f "$src_guess/.pbx.conf" ]] && source "$src_guess/.pbx.conf"
   # 5) env-override (всегда побеждает)
   [[ -n "${PBX_BASE_BRANCH:-}"   ]] && BASE_BRANCH="$PBX_BASE_BRANCH"
@@ -113,7 +114,7 @@ list_projects() {
 }
 
 cmd_list() {
-  c_blue "🔵 Проекты в $WORKSPACE:"
+  c_blue "🔵 Проекты (реестр ∪ WORKSPACE):"
   local any=0 p
   while IFS= read -r p; do c_green "  • $p"; any=1; done < <(list_projects)
   [[ "$any" -eq 1 ]] || c_warn "  (проектов не найдено)"
@@ -270,6 +271,7 @@ cmd_deploy() {
   load_config "$project"
   env="$(strip_cr "${2:-$DEFAULT_ENV}")"
 
+  # NB: deploy/ship ищут scripts/deploy.sh в $PROJECTS_ROOT/<имя>, а НЕ в реестровом REPO.
   local scripts="$PROJECTS_ROOT/$project/scripts"
   [[ -x "$scripts/deploy.sh" ]] || die "Нет $scripts/deploy.sh"
 
@@ -329,7 +331,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
   pbx ship    <проект> <ветка> <сообщение> [env]  всё сразу: pack → deliver → deploy
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
-  pbx list                                      показать проекты в WORKSPACE
+  pbx list                                      показать проекты (реестр ∪ WORKSPACE)
   pbx help                                      эта справка
 
 Проекты: см. `pbx list`

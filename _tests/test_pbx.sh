@@ -116,9 +116,22 @@ test_registry_crlf() {
   rm -rf "$ws" "$reg"
 }
 
+test_registry_crlf_inproject_layer() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local src; src="$(make_ws)"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_TARGET_BRANCH
+  printf 'SRC=%s\r\n' "$src" > "$reg/proj.conf"          # реестр с CRLF
+  printf 'TARGET_BRANCH=fromsrc\n' > "$src/.pbx.conf"     # in-project слой
+  load_config "proj"
+  assert_eq "CRLF в реестровом SRC: in-project .pbx.conf всё равно применён" "$TARGET_BRANCH" "fromsrc"
+  rm -rf "$ws" "$src" "$reg"
+}
+
 # --- Task 3: list_projects --------------------------------------------------
 test_list_projects() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
   unset PBX_IGNORE_DIRS
   mkdir -p "$ws/proj-a" "$ws/proj-b" "$ws/_dist" "$ws/docs" "$ws/.hidden"
   local out; out="$(list_projects)"
@@ -127,7 +140,7 @@ test_list_projects() {
   assert_no  "list: нет _dist"   "$out" "_dist"
   assert_no  "list: нет docs"    "$out" "docs"
   assert_no  "list: нет .hidden" "$out" ".hidden"
-  rm -rf "$ws"
+  rm -rf "$ws" "$reg"
 }
 
 # --- Task 4: list_projects объединение + valid_project ----------------------
@@ -327,6 +340,7 @@ test_load_config_errexit_safe
 test_registry_src_repo
 test_registry_fallback
 test_registry_crlf
+test_registry_crlf_inproject_layer
 test_list_projects
 test_list_union
 test_pack_excludes
