@@ -241,6 +241,8 @@ cmd_deliver() {
   c_blue "🔵 Синхронизирую файлы в $repo"
   local syncex; mapfile -t syncex < <(sync_exclude_args)
   rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
+  rm -rf "$tmp"        # tmp больше не нужен после синка
+  trap - RETURN        # снять RETURN-trap, иначе сработает на возврате cmd_deploy в `pbx ship`
 
   # Ветка от BASE_BRANCH → коммит → пуш с MR/PR в TARGET_BRANCH
   git checkout -b "$branch"

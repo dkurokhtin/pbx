@@ -244,7 +244,7 @@ test_deliver_uses_repo() {
     "$src" "$repo" > "$reg/proj.conf"
 
   cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" >/dev/null 2>&1
-  trap - RETURN   # cmd_deliver оставляет RETURN-trap (bash: не функция-локален) — сбрасываем, чтобы не сработал повторно тут
+  assert_eq "deliver снял RETURN-trap (ship не упадёт)" "$(trap -p RETURN)" ""
 
   assert_eq "deliver: файл синкнут в REPO" "$(cat "$repo/file.txt")" "new"
   assert_has "deliver: added.txt в REPO"   "$(ls "$repo")" "added.txt"
@@ -253,7 +253,6 @@ test_deliver_uses_repo() {
   cd "$HERE"   # cmd_deliver сделал cd "$repo" в текущем шелле — вернуться перед rm -rf
   rm -rf "$base" "$reg"
 }
-test_deliver_uses_repo
 
 # --- Task 5: forge_push -----------------------------------------------------
 test_forge_gitlab() {
@@ -302,6 +301,7 @@ test_sync_excludes
 test_exclude_builders_errexit_safe
 test_pack_e2e
 test_pack_e2e_registry
+test_deliver_uses_repo
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }
