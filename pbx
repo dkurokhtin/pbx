@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  pbx — единый CLI доставки проектов Pybotx (только для WSL).
+#
+#  Складывает прежние pack.sh + update.sh в один инструмент и добавляет
+#  pipeline-команду ship (упаковать → доставить → задеплоить одной строкой).
+#  deploy делегируется родному scripts/deploy.sh проекта — он корректен и
+#  дублировать его не нужно.
+#
+#  Команды:
+#    pbx pack    <проект>
+#    pbx deliver <проект> <ветка> <сообщение> [архив]
+#    pbx deploy  <проект> [env]
+#    pbx ship    <проект> <ветка> <сообщение> [env]
+#    pbx help
+#
+#  Проекты: bot-support-cleaning | smartapp-parking
+# =============================================================================
+set -euo pipefail
+
+# ===== Настройки (можно переопределить через окружение) =====================
+# Где лежат ИСХОДНИКИ (рабочее пространство Cowork, видимое из WSL по /mnt/c):
+WORKSPACE="${PBX_WORKSPACE:-/mnt/c/Users/darkl/Claude/Projects/Pybotx}"
+# Где лежат git-репозитории (== GitLab) на рабочем ноуте:
+PROJECTS_ROOT="${PBX_PROJECTS_ROOT:-/root}"
+# Куда складывать архивы:
+DIST_DIR="${PBX_DIST_DIR:-$WORKSPACE/_dist}"
+# Git-flow:
+BASE_BRANCH="${PBX_BASE_BRANCH:-dev}"        # от какой ветки ответвляемся
+TARGET_BRANCH="${PBX_TARGET_BRANCH:-master}" # куда нацелен MR
+DEFAULT_ENV="${PBX_DEFAULT_ENV:-dev}"        # окружение деплоя по умолчанию
+# ============================================================================
+
+# ---- вывод -----------------------------------------------------------------
+c_blue()  { printf '\033[34m%s\033[0m\n' "$*"; }
+c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
+c_red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+c_warn()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+die()     { c_red "❌ $*"; exit 1; }
+
+# ---- утилиты ---------------------------------------------------------------
+strip_cr() { printf '%s' "${1//$'\r'/}"; }   # защита от CRLF/копипаста
+
+require_wsl() {
+  # pbx рассчитан на WSL: исходники на /mnt/c, репозитории в /root.
+  grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null \
+    || c_warn "⚠️  Похоже, это не WSL. Пути WORKSPACE/PROJECTS_ROOT могут не совпасть."
+}
+
+valid_project() {
+  local p="$1"
+  [[ -d "$WORKSPACE/$p" ]] || die "Нет папки проекта: $WORKSPACE/$p"
+}
+
+# ---- pack ------------------------------------------------------------------
+# Упаковать исходники проекта в _dist/<проект>.tar.gz.
+# Исключаем всё, что не должно попасть в репозиторий: .git, .venv, node_modules,
+# .claude и CLAUDE.md (контекст агента — НЕ коммитим), кэши питона.
+cmd_pack() {
+  local project; project="$(strip_cr "${1:?Использование: pbx pack <проект>}")"
+  valid_project "$project"
+  mkdir -p "$DIST_DIR"
+  local out="$DIST_DIR/$project.tar.gz"
+
+  c_blue "🔵 Упаковка $project → $out"
+  tar -C "$WORKSPACE" \
+    --exclude="$project/.git" \
+    --exclude="$project/.venv" \
+    --exclude="$project/node_modules" \
+    --exclude="$project/front/node_modules" \
+    --exclude="$project/.claude" \
+    --exclude="$project/CLAUDE.md" \
+    --exclude='*/__pycache__' \
+    --exclude='*.pyc' \
+    -czf "$out" "$project"
+
+  c_green "✅ Архив готов: $out"
+  PBX_LAST_ARCHIVE="$out"   # для ship
+}
+
+# ---- deliver ---------------------------------------------------------------
+# Распаковать архив в репозиторий, создать ветку от dev, закоммитить и
+# запушить с созданием MR в master.
+cmd_deliver() {
+  local project branch msg archive
+  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив]}")"
+  branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
+  msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
+  archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
+
+  # Windows-путь → WSL
+  if command -v wslpath >/dev/null 2>&1 && [[ "$archive" == *:\\* || "$archive" == *:/* ]]; then
+    archive="$(wslpath -u "$archive")"
+  fi
+  [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
+
+  # Проверка конвенции ветки — предупреждаем, но не блокируем
+  [[ "$branch" =~ ^(feature|fix|hotfix|bugfix|chore)/ ]] \
+    || c_warn "⚠️  Ветка '$branch' не по конвенции feature/PROJ-123-… — продолжаю как есть."
+
+  local repo="$PROJECTS_ROOT/$project"
+  [[ -d "$repo/.git" ]] || die "Не git-репозиторий: $repo"
+
+  cd "$repo"
+  # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)
+  git config core.fileMode false
+
+  c_blue "🔵 Обновляю $BASE_BRANCH"
+  git checkout "$BASE_BRANCH"
+  git pull origin "$BASE_BRANCH"
+
+  # Распаковка во временную папку
+  local tmp; tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  case "$archive" in
+    *.zip)          unzip -q "$archive" -d "$tmp" ;;
+    *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
+    *.tar)          tar -xf "$archive" -C "$tmp" ;;
+    *) die "Неизвестный формат архива: $archive" ;;
+  esac
+  # Если внутри единственный корневой каталог — заходим в него
+  local inner="$tmp"
+  if [[ $(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 \
+     && $(find "$tmp" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]; then
+    inner="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d)"
+  fi
+
+  # Полная синхронизация (сохраняем служебные файлы репозитория)
+  c_blue "🔵 Синхронизирую файлы в $repo"
+  rsync -a --delete \
+    --exclude='.git/' \
+    --exclude='.gitlab-ci.yml' \
+    --exclude='CLAUDE.md' \
+    --exclude='.claude/' \
+    "$inner"/ "$repo"/
+
+  # Ветка от dev → коммит → пуш с MR в master
+  git checkout -b "$branch"
+  git add -A
+  if git diff --cached --quiet; then
+    c_warn "Изменений нет — выходим."
+    git checkout "$BASE_BRANCH"
+    git branch -d "$branch"
+    return 0
+  fi
+  git commit -m "$msg"
+  git push -o merge_request.create \
+           -o merge_request.target="$TARGET_BRANCH" \
+           -o merge_request.title="$msg" \
+           origin "$branch"
+
+  c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR в '$TARGET_BRANCH' — «$msg»."
+}
+
+# ---- deploy ----------------------------------------------------------------
+# Делегируем родному скрипту проекта (собирает фронт+бэк, образ на REMOTE_HOST,
+# перезапуск контейнера, ожидание healthy). Миграции применяются автоматически.
+cmd_deploy() {
+  local project env
+  project="$(strip_cr "${1:?Использование: pbx deploy <проект> [env]}")"
+  env="$(strip_cr "${2:-$DEFAULT_ENV}")"
+
+  local scripts="$PROJECTS_ROOT/$project/scripts"
+  [[ -x "$scripts/deploy.sh" ]] || die "Нет $scripts/deploy.sh"
+
+  c_blue "🔵 Деплой $project → $env"
+  ( cd "$scripts" && ./deploy.sh "$env" )
+  c_green "✅ Деплой $project ($env) завершён."
+}
+
+# ---- ship ------------------------------------------------------------------
+# Полный конвейер: pack → deliver → deploy.
+cmd_ship() {
+  local project branch msg env
+  project="$(strip_cr "${1:?Использование: pbx ship <проект> <ветка> <сообщение> [env]}")"
+  branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
+  msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
+  env="$(strip_cr "${4:-$DEFAULT_ENV}")"
+
+  c_blue "🚀 ship $project → ветка '$branch', env '$env'"
+  cmd_pack "$project"
+  cmd_deliver "$project" "$branch" "$msg" "$PBX_LAST_ARCHIVE"
+  cmd_deploy "$project" "$env"
+  c_green "🎉 Готово: $project доставлен и задеплоен ($env)."
+}
+
+# ---- help ------------------------------------------------------------------
+cmd_help() {
+  cat <<'EOF'
+pbx — доставка проектов Pybotx (WSL)
+
+  pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
+  pbx deliver <проект> <ветка> <сообщение> [архив]
+                                                распаковать в репо, ветка от dev, MR в master
+  pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
+  pbx ship    <проект> <ветка> <сообщение> [env]  всё сразу: pack → deliver → deploy
+  pbx help                                      эта справка
+
+Проекты: bot-support-cleaning | smartapp-parking
+
+Примеры:
+  pbx pack smartapp-parking
+  pbx deliver smartapp-parking feature/SUBA-2147-fix-parking "Починить бронь парковки"
+  pbx deploy smartapp-parking test
+  pbx ship bot-support-cleaning feature/SUBA-2147-office-filter "Добавить фильтр офисов" dev
+
+Переопределяемые переменные окружения:
+  PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
+  PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
+  PBX_TARGET_BRANCH (=master)  PBX_DEFAULT_ENV (=dev)
+EOF
+}
+
+# ---- диспетчер -------------------------------------------------------------
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    pack)               require_wsl; cmd_pack "$@" ;;
+    deliver|update)     require_wsl; cmd_deliver "$@" ;;
+    deploy)             require_wsl; cmd_deploy "$@" ;;
+    ship)               require_wsl; cmd_ship "$@" ;;
+    help|-h|--help)     cmd_help ;;
+    *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;
+  esac
+}
+
+main "$@"
