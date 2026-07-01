@@ -12,13 +12,57 @@ assert_eq()  { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (ожидал '
 assert_has() { case "$2" in *"$3"*) ok "$1";; *) bad "$1 (нет '$3' в: $2)";; esac; }
 assert_no()  { case "$2" in *"$3"*) bad "$1 (не должно быть '$3')";; *) ok "$1";; esac; }
 
+# Грузим функции pbx в текущий шелл (main не запустится из-за guard)
+source "$PBX"
+set +eo pipefail   # source включил errexit из pbx — выключаем для тестов
+
+# Утилита: создать временный WORKSPACE и вернуть путь
+make_ws() { mktemp -d; }
+
 # --- Task 1 -----------------------------------------------------------------
 test_source_no_run() {
   local out; out="$(bash -c 'source "'"$PBX"'"' 2>&1)"
   assert_eq "source не запускает main (пустой вывод)" "$out" ""
 }
 
+# --- Task 2: load_config ----------------------------------------------------
+test_defaults() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_DEFAULT_ENV PBX_FORGE
+  mkdir -p "$ws/proj"
+  load_config "proj"
+  assert_eq "дефолт BASE_BRANCH"   "$BASE_BRANCH"   "dev"
+  assert_eq "дефолт TARGET_BRANCH" "$TARGET_BRANCH" "master"
+  assert_eq "дефолт DEFAULT_ENV"   "$DEFAULT_ENV"   "dev"
+  assert_eq "дефолт FORGE"         "$FORGE"         "gitlab"
+  rm -rf "$ws"
+}
+
+test_project_over_global() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  unset PBX_TARGET_BRANCH
+  mkdir -p "$ws/proj"
+  printf 'TARGET_BRANCH=aaa\n' > "$ws/.pbx.conf"
+  printf 'TARGET_BRANCH=bbb\n' > "$ws/proj/.pbx.conf"
+  load_config "proj"
+  assert_eq "проектный конфиг перебивает глобальный" "$TARGET_BRANCH" "bbb"
+  rm -rf "$ws"
+}
+
+test_env_wins() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  mkdir -p "$ws/proj"
+  printf 'TARGET_BRANCH=bbb\n' > "$ws/proj/.pbx.conf"
+  PBX_TARGET_BRANCH=ccc load_config "proj"
+  assert_eq "env перебивает проектный конфиг" "$TARGET_BRANCH" "ccc"
+  unset PBX_TARGET_BRANCH
+  rm -rf "$ws"
+}
+
 test_source_no_run
+test_defaults
+test_project_over_global
+test_env_wins
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]

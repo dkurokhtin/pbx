@@ -18,17 +18,18 @@
 # =============================================================================
 set -euo pipefail
 
-# ===== Настройки (можно переопределить через окружение) =====================
-# Где лежат ИСХОДНИКИ (рабочее пространство Cowork, видимое из WSL по /mnt/c):
+# ===== Глобальные настройки (env-override) ==================================
+# Где лежат ИСХОДНИКИ (рабочее пространство, видимое из WSL по /mnt/c):
 WORKSPACE="${PBX_WORKSPACE:-/mnt/c/Users/darkl/Claude/Projects/Pybotx}"
 # Где лежат git-репозитории (== GitLab) на рабочем ноуте:
 PROJECTS_ROOT="${PBX_PROJECTS_ROOT:-/root}"
 # Куда складывать архивы:
 DIST_DIR="${PBX_DIST_DIR:-$WORKSPACE/_dist}"
-# Git-flow:
-BASE_BRANCH="${PBX_BASE_BRANCH:-dev}"        # от какой ветки ответвляемся
-TARGET_BRANCH="${PBX_TARGET_BRANCH:-master}" # куда нацелен MR
-DEFAULT_ENV="${PBX_DEFAULT_ENV:-dev}"        # окружение деплоя по умолчанию
+# Каталоги WORKSPACE, которые НЕ являются проектами (кроме _* и .*):
+PBX_IGNORE_DIRS="${PBX_IGNORE_DIRS:-docs}"
+# Пер-проектные настройки (BASE_BRANCH/TARGET_BRANCH/DEFAULT_ENV/FORGE и
+# excludes) резолвит load_config: дефолт → $WORKSPACE/.pbx.conf →
+# $WORKSPACE/<проект>/.pbx.conf → env PBX_*.
 # ============================================================================
 
 # ---- вывод -----------------------------------------------------------------
@@ -40,6 +41,28 @@ die()     { c_red "❌ $*"; exit 1; }
 
 # ---- утилиты ---------------------------------------------------------------
 strip_cr() { printf '%s' "${1//$'\r'/}"; }   # защита от CRLF/копипаста
+
+# Резолв настроек: дефолты → глобальный конфиг → проектный конфиг → env.
+load_config() {
+  local project="${1:-}"
+  # 1) встроенные дефолты
+  BASE_BRANCH="dev"
+  TARGET_BRANCH="master"
+  DEFAULT_ENV="dev"
+  FORGE="gitlab"
+  EXTRA_PACK_EXCLUDES=()
+  EXTRA_SYNC_EXCLUDES=()
+  # 2) глобальный конфиг
+  [[ -f "$WORKSPACE/.pbx.conf" ]] && source "$WORKSPACE/.pbx.conf"
+  # 3) пер-проектный конфиг
+  [[ -n "$project" && -f "$WORKSPACE/$project/.pbx.conf" ]] && \
+    source "$WORKSPACE/$project/.pbx.conf"
+  # 4) env-override (всегда побеждает)
+  [[ -n "${PBX_BASE_BRANCH:-}"   ]] && BASE_BRANCH="$PBX_BASE_BRANCH"
+  [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
+  [[ -n "${PBX_DEFAULT_ENV:-}"   ]] && DEFAULT_ENV="$PBX_DEFAULT_ENV"
+  [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
+}
 
 require_wsl() {
   # pbx рассчитан на WSL: исходники на /mnt/c, репозитории в /root.
