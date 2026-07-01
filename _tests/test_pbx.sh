@@ -115,6 +115,40 @@ test_exclude_builders_errexit_safe() {
   assert_eq "билдеры excludes не падают под set -e (пустые массивы)" "$out" "REACHED"
 }
 
+# --- Task 5: forge_push -----------------------------------------------------
+CALLS=""
+git() { printf 'git %s\n' "$*" >> "$CALLS"; }
+gh()  { printf 'gh %s\n'  "$*" >> "$CALLS"; }
+
+test_forge_gitlab() {
+  CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="master"
+  forge_push "feature/X-1" "мой коммит"
+  local out; out="$(cat "$CALLS")"
+  assert_has "gitlab: merge_request.create" "$out" "merge_request.create"
+  assert_has "gitlab: target=master"        "$out" "merge_request.target=master"
+  assert_has "gitlab: push origin ветка"    "$out" "origin feature/X-1"
+  rm -f "$CALLS"
+}
+test_forge_github() {
+  CALLS="$(mktemp)"; FORGE="github"; TARGET_BRANCH="main"
+  forge_push "feature/X-2" "second"
+  local out; out="$(cat "$CALLS")"
+  assert_has "github: git push origin" "$out" "git push origin feature/X-2"
+  assert_has "github: gh pr create"    "$out" "gh pr create"
+  assert_has "github: base main"       "$out" "--base main"
+  assert_no  "github: без MR-опций"    "$out" "merge_request.create"
+  rm -f "$CALLS"
+}
+test_forge_none() {
+  CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
+  forge_push "feature/X-3" "third"
+  local out; out="$(cat "$CALLS")"
+  assert_has "none: push есть"       "$out" "git push origin feature/X-3"
+  assert_no  "none: без MR"          "$out" "merge_request.create"
+  assert_no  "none: без gh"          "$out" "gh pr create"
+  rm -f "$CALLS"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
@@ -125,6 +159,10 @@ test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
 test_exclude_builders_errexit_safe
+test_forge_gitlab
+test_forge_github
+test_forge_none
+unset -f git gh
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]

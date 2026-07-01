@@ -144,6 +144,30 @@ cmd_pack() {
   PBX_LAST_ARCHIVE="$out"   # для ship
 }
 
+# Пуш ветки + создание MR/PR согласно FORGE.
+forge_push() {
+  local branch="$1" msg="$2"
+  case "$FORGE" in
+    gitlab)
+      git push -o merge_request.create \
+               -o merge_request.target="$TARGET_BRANCH" \
+               -o merge_request.title="$msg" \
+               origin "$branch"
+      ;;
+    github)
+      git push origin "$branch"
+      gh pr create --base "$TARGET_BRANCH" --head "$branch" \
+                   --title "$msg" --body "$msg"
+      ;;
+    none)
+      git push origin "$branch"
+      ;;
+    *)
+      die "Неизвестный FORGE: '$FORGE' (ожидается gitlab|github|none)"
+      ;;
+  esac
+}
+
 # ---- deliver ---------------------------------------------------------------
 # Распаковать архив в репозиторий, создать ветку от dev, закоммитить и
 # запушить с созданием MR в master.
@@ -207,12 +231,12 @@ cmd_deliver() {
     return 0
   fi
   git commit -m "$msg"
-  git push -o merge_request.create \
-           -o merge_request.target="$TARGET_BRANCH" \
-           -o merge_request.title="$msg" \
-           origin "$branch"
+  forge_push "$branch" "$msg"
 
-  c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR в '$TARGET_BRANCH' — «$msg»."
+  case "$FORGE" in
+    none) c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH' запушена (без MR/PR) — «$msg».";;
+    *)    c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR/PR в '$TARGET_BRANCH' — «$msg».";;
+  esac
 }
 
 # ---- deploy ----------------------------------------------------------------
