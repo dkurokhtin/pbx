@@ -60,6 +60,16 @@ test_env_wins() {
   rm -rf "$ws"
 }
 
+test_load_config_crlf() {
+  local ws; ws="$(make_ws)"; mkdir -p "$ws/proj"; WORKSPACE="$ws"
+  unset PBX_FORGE PBX_TARGET_BRANCH PBX_BASE_BRANCH PBX_DEFAULT_ENV
+  printf 'FORGE=github\r\nTARGET_BRANCH=dev\r\n' > "$ws/proj/.pbx.conf"
+  load_config "proj"
+  assert_eq "CRLF в конфиге: FORGE без CR"         "$FORGE"         "github"
+  assert_eq "CRLF в конфиге: TARGET_BRANCH без CR" "$TARGET_BRANCH" "dev"
+  rm -rf "$ws"
+}
+
 test_load_config_errexit_safe() {
   local ws; ws="$(make_ws)"; mkdir -p "$ws/proj"
   # Запускаем в свежем bash с set -e: load_config без PBX_FORGE не должен ронять скрипт.
@@ -169,6 +179,7 @@ test_source_no_run
 test_defaults
 test_project_over_global
 test_env_wins
+test_load_config_crlf
 test_load_config_errexit_safe
 test_list_projects
 test_pack_excludes
