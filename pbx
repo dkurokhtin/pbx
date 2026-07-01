@@ -93,6 +93,54 @@ valid_project() {
   exit 1
 }
 
+# ---- scan: обнаружение репозиториев ----------------------------------------
+# URL remote (origin, иначе первый) если <dir> — git-репо с remote; иначе пусто.
+repo_remote_url() {
+  local dir="$1" url first
+  [[ -d "$dir/.git" ]] || return 0
+  url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)"
+  if [[ -z "$url" ]]; then
+    first="$(git -C "$dir" remote 2>/dev/null | head -1 || true)"
+    [[ -n "$first" ]] && url="$(git -C "$dir" config --get "remote.$first.url" 2>/dev/null || true)"
+  fi
+  printf '%s' "$url"
+  return 0
+}
+
+# По подпапкам <root> печатает кандидатов:
+#   OK\t<имя>\t<путь-репо>\t<remote>   — репо с remote (сам или единственный в контейнере)
+#   WARN\t<имя>\t<причина>             — контейнер с несколькими внутренними репо
+scan_candidates() {
+  local root="$1" d name url inner cnt only
+  for d in "$root"/*/; do
+    [[ -d "$d" ]] || continue
+    d="${d%/}"
+    name="$(basename "$d")"
+    [[ "$name" == _* || "$name" == .* ]] && continue
+    [[ -d "$d/.git" ]] || continue
+    url="$(repo_remote_url "$d")"
+    if [[ -n "$url" ]]; then
+      printf 'OK\t%s\t%s\t%s\n' "$name" "$d" "$url"
+      continue
+    fi
+    # контейнер (git без remote) — ищем ровно один внутренний репо с remote
+    cnt=0; only=""
+    for inner in "$d"/*/; do
+      [[ -d "$inner" ]] || continue
+      inner="${inner%/}"
+      [[ -d "$inner/.git" ]] || continue
+      [[ -n "$(repo_remote_url "$inner")" ]] || continue
+      cnt=$((cnt+1)); only="$inner"
+    done
+    if [[ "$cnt" -eq 1 ]]; then
+      printf 'OK\t%s\t%s\t%s\n' "$name" "$only" "$(repo_remote_url "$only")"
+    elif [[ "$cnt" -gt 1 ]]; then
+      printf 'WARN\t%s\t%s\n' "$name" "неоднозначный контейнер: $cnt внутренних репо с remote"
+    fi
+  done
+  return 0
+}
+
 # Проекты = (реестр $PBX_REGISTRY_DIR/*.conf) ∪ (подпапки WORKSPACE, кроме служебных).
 list_projects() {
   local ignore=" ${PBX_IGNORE_DIRS:-docs} " d name

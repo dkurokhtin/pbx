@@ -22,6 +22,11 @@ PBX_REGISTRY_DIR="$(mktemp -d)"   # пустой каталог по умолч�
 # Утилита: создать временный WORKSPACE и вернуть путь
 make_ws() { mktemp -d; }
 
+# git-репо с remote (без коммитов достаточно для обнаружения)
+mk_repo() { git init -q "$1"; git -C "$1" remote add origin "$2"; }
+# git-репо БЕЗ remote (контейнер)
+mk_container() { git init -q "$1"; }
+
 # --- Task 1 -----------------------------------------------------------------
 test_source_no_run() {
   local out; out="$(bash -c 'source "'"$PBX"'"' 2>&1)"
@@ -331,7 +336,56 @@ test_valid_project_registry_elsewhere() {
   rm -rf "$ws" "$src" "$reg"
 }
 
+# --- pbx scan: обнаружение --------------------------------------------------
+test_repo_remote_url() {
+  local ws; ws="$(make_ws)"
+  mk_repo "$ws/a" "git@gitlab.rt-dc.ru:x/a.git"
+  mk_container "$ws/b"
+  assert_eq "remote есть"  "$(repo_remote_url "$ws/a")" "git@gitlab.rt-dc.ru:x/a.git"
+  assert_eq "remote пусто" "$(repo_remote_url "$ws/b")" ""
+  assert_eq "не git пусто" "$(repo_remote_url "$ws/nope")" ""
+  rm -rf "$ws"
+}
+test_scan_whole_repo() {
+  local ws; ws="$(make_ws)"
+  mk_repo "$ws/proj" "git@gitlab.rt-dc.ru:x/proj.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "whole: OK proj" "$out" "$(printf 'OK\tproj\t%s/proj\tgit@gitlab.rt-dc.ru:x/proj.git' "$ws")"
+  rm -rf "$ws"
+}
+test_scan_container_one() {
+  local ws; ws="$(make_ws)"
+  mk_container "$ws/vnd"
+  mk_repo "$ws/vnd/vnd_frontend" "git@gitlab.rt-dc.ru:suba/vnd_frontend.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "container→inner под именем vnd" "$out" "$(printf 'OK\tvnd\t%s/vnd/vnd_frontend' "$ws")"
+  rm -rf "$ws"
+}
+test_scan_container_multi() {
+  local ws; ws="$(make_ws)"
+  mk_container "$ws/c"
+  mk_repo "$ws/c/a" "git@h:/a.git"; mk_repo "$ws/c/b" "git@h:/b.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "multi→WARN" "$out" "$(printf 'WARN\tc\t')"
+  assert_no  "multi→не OK" "$out" "$(printf 'OK\tc\t')"
+  rm -rf "$ws"
+}
+test_scan_skips_nongit_and_noremote() {
+  local ws; ws="$(make_ws)"
+  mkdir -p "$ws/plain"                 # не git
+  mk_container "$ws/empty"             # git без remote, без внутренних репо
+  local out; out="$(scan_candidates "$ws")"
+  assert_no "plain пропущен" "$out" "plain"
+  assert_no "empty пропущен" "$out" "empty"
+  rm -rf "$ws"
+}
+
 test_source_no_run
+test_repo_remote_url
+test_scan_whole_repo
+test_scan_container_one
+test_scan_container_multi
+test_scan_skips_nongit_and_noremote
 test_defaults
 test_project_over_global
 test_env_wins
