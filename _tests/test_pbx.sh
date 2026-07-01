@@ -116,10 +116,6 @@ test_exclude_builders_errexit_safe() {
 }
 
 # --- Task 5: forge_push -----------------------------------------------------
-CALLS=""
-git() { printf 'git %s\n' "$*" >> "$CALLS"; }
-gh()  { printf 'gh %s\n'  "$*" >> "$CALLS"; }
-
 test_forge_gitlab() {
   CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="master"
   forge_push "feature/X-1" "мой коммит"
@@ -159,6 +155,10 @@ test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
 test_exclude_builders_errexit_safe
+
+# Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
+git() { printf 'git %s\n' "$*" >> "$CALLS"; }
+gh()  { printf 'gh %s\n'  "$*" >> "$CALLS"; }
 test_forge_gitlab
 test_forge_github
 test_forge_none
