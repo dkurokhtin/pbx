@@ -84,12 +84,40 @@ test_list_projects() {
   rm -rf "$ws"
 }
 
+# --- Task 4: exclude builders ----------------------------------------------
+test_pack_excludes() {
+  EXTRA_PACK_EXCLUDES=("dist" "coverage")
+  local out; out="$(pack_exclude_args "proj")"
+  assert_has "pack: базовый .git"       "$out" "--exclude=proj/.git"
+  assert_has "pack: node_modules"       "$out" "--exclude=proj/node_modules"
+  assert_has "pack: .pbx.conf исключён" "$out" "--exclude=proj/.pbx.conf"
+  assert_has "pack: pyc"                "$out" "--exclude=*.pyc"
+  assert_has "pack: extra dist"         "$out" "--exclude=proj/dist"
+  assert_has "pack: extra coverage"     "$out" "--exclude=proj/coverage"
+}
+test_pack_excludes_empty() {
+  EXTRA_PACK_EXCLUDES=()
+  local out; out="$(pack_exclude_args "proj")"
+  assert_has "pack(empty): базовый .git" "$out" "--exclude=proj/.git"
+}
+test_sync_excludes() {
+  EXTRA_SYNC_EXCLUDES=("build")
+  local out; out="$(sync_exclude_args)"
+  assert_has "sync: .git/"              "$out" "--exclude=.git/"
+  assert_has "sync: .gitlab-ci.yml"     "$out" "--exclude=.gitlab-ci.yml"
+  assert_has "sync: .pbx.conf исключён" "$out" "--exclude=.pbx.conf"
+  assert_has "sync: extra build"        "$out" "--exclude=build"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
 test_env_wins
 test_load_config_errexit_safe
 test_list_projects
+test_pack_excludes
+test_pack_excludes_empty
+test_sync_excludes
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]

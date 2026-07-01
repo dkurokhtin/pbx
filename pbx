@@ -99,6 +99,30 @@ cmd_list() {
   [[ "$any" -eq 1 ]] || c_warn "  (проектов не найдено)"
 }
 
+# ---- exclude builders (pack/deliver) ---------------------------------------
+# Аргументы --exclude для tar (пути относительно WORKSPACE → с префиксом проекта).
+pack_exclude_args() {
+  local project="$1" e
+  local base=( ".git" ".venv" "node_modules" "front/node_modules" \
+               ".claude" "CLAUDE.md" ".pbx.conf" )
+  for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$project/$e"; done
+  printf -- '--exclude=%s\n' '*/__pycache__'
+  printf -- '--exclude=%s\n' '*.pyc'
+  for e in "${EXTRA_PACK_EXCLUDES[@]:-}"; do
+    [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$project/$e"
+  done
+}
+
+# Аргументы --exclude для rsync (относительно корня переноса).
+sync_exclude_args() {
+  local e
+  local base=( ".git/" ".gitlab-ci.yml" "CLAUDE.md" ".claude/" ".pbx.conf" )
+  for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$e"; done
+  for e in "${EXTRA_SYNC_EXCLUDES[@]:-}"; do
+    [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$e"
+  done
+}
+
 # ---- pack ------------------------------------------------------------------
 # Упаковать исходники проекта в _dist/<проект>.tar.gz.
 # Исключаем всё, что не должно попасть в репозиторий: .git, .venv, node_modules,
@@ -106,20 +130,13 @@ cmd_list() {
 cmd_pack() {
   local project; project="$(strip_cr "${1:?Использование: pbx pack <проект>}")"
   valid_project "$project"
+  load_config "$project"
   mkdir -p "$DIST_DIR"
   local out="$DIST_DIR/$project.tar.gz"
 
   c_blue "🔵 Упаковка $project → $out"
-  tar -C "$WORKSPACE" \
-    --exclude="$project/.git" \
-    --exclude="$project/.venv" \
-    --exclude="$project/node_modules" \
-    --exclude="$project/front/node_modules" \
-    --exclude="$project/.claude" \
-    --exclude="$project/CLAUDE.md" \
-    --exclude='*/__pycache__' \
-    --exclude='*.pyc' \
-    -czf "$out" "$project"
+  local excludes; mapfile -t excludes < <(pack_exclude_args "$project")
+  tar -C "$WORKSPACE" "${excludes[@]}" -czf "$out" "$project"
 
   c_green "✅ Архив готов: $out"
   PBX_LAST_ARCHIVE="$out"   # для ship
@@ -147,6 +164,7 @@ cmd_deliver() {
 
   local repo="$PROJECTS_ROOT/$project"
   [[ -d "$repo/.git" ]] || die "Не git-репозиторий: $repo"
+  load_config "$project"
 
   cd "$repo"
   # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)
@@ -174,12 +192,8 @@ cmd_deliver() {
 
   # Полная синхронизация (сохраняем служебные файлы репозитория)
   c_blue "🔵 Синхронизирую файлы в $repo"
-  rsync -a --delete \
-    --exclude='.git/' \
-    --exclude='.gitlab-ci.yml' \
-    --exclude='CLAUDE.md' \
-    --exclude='.claude/' \
-    "$inner"/ "$repo"/
+  local syncex; mapfile -t syncex < <(sync_exclude_args)
+  rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
 
   # Ветка от dev → коммит → пуш с MR в master
   git checkout -b "$branch"
