@@ -109,6 +109,12 @@ test_sync_excludes() {
   assert_has "sync: extra build"        "$out" "--exclude=build"
 }
 
+test_exclude_builders_errexit_safe() {
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=(); a="$(pack_exclude_args proj)"; b="$(sync_exclude_args)"; echo REACHED' 2>&1)"
+  assert_eq "билдеры excludes не падают под set -e (пустые массивы)" "$out" "REACHED"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
@@ -118,6 +124,7 @@ test_list_projects
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
+test_exclude_builders_errexit_safe
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]
