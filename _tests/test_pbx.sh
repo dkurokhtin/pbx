@@ -32,7 +32,7 @@ test_defaults() {
   mkdir -p "$ws/proj"
   load_config "proj"
   assert_eq "дефолт BASE_BRANCH"   "$BASE_BRANCH"   "dev"
-  assert_eq "дефолт TARGET_BRANCH" "$TARGET_BRANCH" "master"
+  assert_eq "дефолт TARGET_BRANCH" "$TARGET_BRANCH" "dev"
   assert_eq "дефолт DEFAULT_ENV"   "$DEFAULT_ENV"   "dev"
   assert_eq "дефолт FORGE"         "$FORGE"         "gitlab"
   rm -rf "$ws"

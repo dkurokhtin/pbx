@@ -48,7 +48,7 @@ load_config() {
   local project="${1:-}"
   # 1) встроенные дефолты
   BASE_BRANCH="dev"
-  TARGET_BRANCH="master"
+  TARGET_BRANCH="dev"      # MR/PR по умолчанию в dev; master-MR делается вручную перед релизом
   DEFAULT_ENV="dev"
   FORGE="gitlab"
   EXTRA_PACK_EXCLUDES=()
@@ -176,8 +176,8 @@ forge_push() {
 }
 
 # ---- deliver ---------------------------------------------------------------
-# Распаковать архив в репозиторий, создать ветку от dev, закоммитить и
-# запушить с созданием MR в master.
+# Распаковать архив в репозиторий, создать ветку от BASE_BRANCH, закоммитить и
+# запушить с созданием MR/PR в TARGET_BRANCH (по умолчанию dev; настраивается).
 cmd_deliver() {
   local project branch msg archive
   project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив]}")"
@@ -228,7 +228,7 @@ cmd_deliver() {
   local syncex; mapfile -t syncex < <(sync_exclude_args)
   rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
 
-  # Ветка от dev → коммит → пуш с MR в master
+  # Ветка от BASE_BRANCH → коммит → пуш с MR/PR в TARGET_BRANCH
   git checkout -b "$branch"
   git add -A
   if git diff --cached --quiet; then
@@ -304,11 +304,11 @@ pbx — доставка проектов Pybotx (WSL)
 Переопределяемые переменные окружения:
   PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
-  PBX_TARGET_BRANCH (=master)  PBX_DEFAULT_ENV (=dev)  PBX_FORGE (=gitlab)
+  PBX_TARGET_BRANCH (=dev)     PBX_DEFAULT_ENV (=dev)  PBX_FORGE (=gitlab)
 
 Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
   BASE_BRANCH=dev            от какой ветки ответвляемся
-  TARGET_BRANCH=master       куда MR/PR
+  TARGET_BRANCH=dev          куда MR/PR (master-MR обычно вручную перед релизом)
   DEFAULT_ENV=dev            окружение деплоя
   FORGE=gitlab               gitlab | github | none
   EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
