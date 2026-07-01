@@ -231,6 +231,14 @@ load_config() {
   [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
   [[ -n "${PBX_DEFAULT_ENV:-}"   ]] && DEFAULT_ENV="$PBX_DEFAULT_ENV"
   [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
+  # Защита от CRLF: конфиги на /mnt/c часто сохраняются Windows-редактором с \r
+  local __v __i
+  for __v in BASE_BRANCH TARGET_BRANCH DEFAULT_ENV FORGE; do
+    printf -v "$__v" '%s' "${!__v//$'\r'/}"
+  done
+  for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
+  for __i in "${!EXTRA_SYNC_EXCLUDES[@]}"; do EXTRA_SYNC_EXCLUDES[$__i]="${EXTRA_SYNC_EXCLUDES[$__i]//$'\r'/}"; done
+  return 0   # иначе статус функции = статус последнего && (1, если PBX_FORGE не задан) → падение под set -e
 }
 ```
 
@@ -427,6 +435,7 @@ pack_exclude_args() {
   for e in "${EXTRA_PACK_EXCLUDES[@]:-}"; do
     [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$project/$e"
   done
+  return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
 }
 
 # Аргументы --exclude для rsync (относительно корня переноса).
@@ -437,6 +446,7 @@ sync_exclude_args() {
   for e in "${EXTRA_SYNC_EXCLUDES[@]:-}"; do
     [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$e"
   done
+  return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
 }
 ```
 
