@@ -16,6 +16,9 @@ assert_no()  { case "$2" in *"$3"*) bad "$1 (не должно быть '$3')";;
 source "$PBX"
 set +eo pipefail   # source включил errexit из pbx — выключаем для тестов
 
+# Изоляция: тесты не должны видеть реальный реестр пользователя
+PBX_REGISTRY_DIR="$(mktemp -d)"   # пустой каталог по умолчанию
+
 # Утилита: создать временный WORKSPACE и вернуть путь
 make_ws() { mktemp -d; }
 
@@ -78,6 +81,39 @@ test_load_config_errexit_safe() {
         bash -c 'set -euo pipefail; source "'"$PBX"'"; WORKSPACE="'"$ws"'"; load_config proj; echo REACHED' 2>&1)"
   assert_eq "load_config не падает под set -e (нет PBX_FORGE)" "$out" "REACHED"
   rm -rf "$ws"
+}
+
+# --- Task 1: реестр SRC/REPO -------------------------------------------------
+test_registry_src_repo() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; PROJECTS_ROOT="/root"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_DEFAULT_ENV PBX_FORGE
+  printf 'SRC=/home/me/sup\nREPO=/root/sup\nTARGET_BRANCH=dev\n' > "$reg/sup.conf"
+  load_config "sup"
+  assert_eq "реестр: SRC"           "$SRC"           "/home/me/sup"
+  assert_eq "реестр: REPO"          "$REPO"          "/root/sup"
+  assert_eq "реестр: TARGET_BRANCH" "$TARGET_BRANCH" "dev"
+  rm -rf "$ws" "$reg"
+}
+
+test_registry_fallback() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; PROJECTS_ROOT="/srv"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"   # пуст → нет записи
+  mkdir -p "$ws/foo"
+  load_config "foo"
+  assert_eq "fallback: SRC = WORKSPACE/foo"      "$SRC"  "$ws/foo"
+  assert_eq "fallback: REPO = PROJECTS_ROOT/foo" "$REPO" "/srv/foo"
+  rm -rf "$ws" "$reg"
+}
+
+test_registry_crlf() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=/home/me/sup\r\nREPO=/root/sup\r\n' > "$reg/sup.conf"
+  load_config "sup"
+  assert_eq "реестр: SRC без CR"  "$SRC"  "/home/me/sup"
+  assert_eq "реестр: REPO без CR" "$REPO" "/root/sup"
+  rm -rf "$ws" "$reg"
 }
 
 # --- Task 3: list_projects --------------------------------------------------
@@ -181,6 +217,9 @@ test_project_over_global
 test_env_wins
 test_load_config_crlf
 test_load_config_errexit_safe
+test_registry_src_repo
+test_registry_fallback
+test_registry_crlf
 test_list_projects
 test_pack_excludes
 test_pack_excludes_empty

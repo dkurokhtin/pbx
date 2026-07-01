@@ -28,6 +28,8 @@ PROJECTS_ROOT="${PBX_PROJECTS_ROOT:-/root}"
 DIST_DIR="${PBX_DIST_DIR:-$WORKSPACE/_dist}"
 # Каталоги WORKSPACE, которые НЕ являются проектами (кроме _* и .*):
 PBX_IGNORE_DIRS="${PBX_IGNORE_DIRS:-docs}"
+# Каталог реестра проектов (имя → SRC/REPO + пер-проектные ключи):
+PBX_REGISTRY_DIR="${PBX_REGISTRY_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pbx/projects}"
 # Пер-проектные настройки (BASE_BRANCH/TARGET_BRANCH/DEFAULT_ENV/FORGE и
 # excludes) резолвит load_config: дефолт → $WORKSPACE/.pbx.conf →
 # $WORKSPACE/<проект>/.pbx.conf → env PBX_*.
@@ -43,34 +45,37 @@ die()     { c_red "❌ $*"; exit 1; }
 # ---- утилиты ---------------------------------------------------------------
 strip_cr() { printf '%s' "${1//$'\r'/}"; }   # защита от CRLF/копипаста
 
-# Резолв настроек: дефолты → глобальный конфиг → проектный конфиг → env.
+# Резолв настроек: дефолты → глобальный конфиг → реестр → в-проектный → env.
 load_config() {
   local project="${1:-}"
   # 1) встроенные дефолты
-  BASE_BRANCH="dev"
-  TARGET_BRANCH="dev"      # MR/PR по умолчанию в dev; master-MR делается вручную перед релизом
-  DEFAULT_ENV="dev"
-  FORGE="gitlab"
-  EXTRA_PACK_EXCLUDES=()
-  EXTRA_SYNC_EXCLUDES=()
+  BASE_BRANCH="dev"; TARGET_BRANCH="dev"; DEFAULT_ENV="dev"; FORGE="gitlab"
+  EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=()
+  SRC=""; REPO=""
   # 2) глобальный конфиг
   [[ -f "$WORKSPACE/.pbx.conf" ]] && source "$WORKSPACE/.pbx.conf"
-  # 3) пер-проектный конфиг
-  [[ -n "$project" && -f "$WORKSPACE/$project/.pbx.conf" ]] && \
-    source "$WORKSPACE/$project/.pbx.conf"
-  # 4) env-override (всегда побеждает)
+  # 3) реестр проекта (центральный)
+  [[ -n "$project" && -f "$PBX_REGISTRY_DIR/$project.conf" ]] && \
+    source "$PBX_REGISTRY_DIR/$project.conf"
+  # 4) в-проекте (SRC уже мог задаться реестром; иначе WORKSPACE/<имя>)
+  local src_guess="${SRC:-$WORKSPACE/$project}"
+  [[ -n "$project" && -f "$src_guess/.pbx.conf" ]] && source "$src_guess/.pbx.conf"
+  # 5) env-override (всегда побеждает)
   [[ -n "${PBX_BASE_BRANCH:-}"   ]] && BASE_BRANCH="$PBX_BASE_BRANCH"
   [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
   [[ -n "${PBX_DEFAULT_ENV:-}"   ]] && DEFAULT_ENV="$PBX_DEFAULT_ENV"
   [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
-  # Защита от CRLF: конфиги на /mnt/c часто сохраняются Windows-редактором с \r
+  # 6) финализация путей (fallback)
+  SRC="${SRC:-$WORKSPACE/$project}"
+  REPO="${REPO:-$PROJECTS_ROOT/$project}"
+  # 7) защита от CRLF (конфиги на /mnt/c часто с \r), включая SRC/REPO
   local __v __i
-  for __v in BASE_BRANCH TARGET_BRANCH DEFAULT_ENV FORGE; do
+  for __v in BASE_BRANCH TARGET_BRANCH DEFAULT_ENV FORGE SRC REPO; do
     printf -v "$__v" '%s' "${!__v//$'\r'/}"
   done
   for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
   for __i in "${!EXTRA_SYNC_EXCLUDES[@]}"; do EXTRA_SYNC_EXCLUDES[$__i]="${EXTRA_SYNC_EXCLUDES[$__i]//$'\r'/}"; done
-  return 0   # иначе статус функции = статус последнего && (1, если PBX_FORGE не задан) → падение под set -e
+  return 0
 }
 
 require_wsl() {
