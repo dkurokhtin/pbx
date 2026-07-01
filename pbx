@@ -62,6 +62,7 @@ load_config() {
   [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
   [[ -n "${PBX_DEFAULT_ENV:-}"   ]] && DEFAULT_ENV="$PBX_DEFAULT_ENV"
   [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
+  return 0   # иначе статус функции = статус последнего && (1, если PBX_FORGE не задан) → падение под set -e
 }
 
 require_wsl() {

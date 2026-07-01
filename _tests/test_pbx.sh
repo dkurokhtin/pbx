@@ -51,6 +51,7 @@ test_project_over_global() {
 
 test_env_wins() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  unset PBX_BASE_BRANCH PBX_DEFAULT_ENV PBX_FORGE
   mkdir -p "$ws/proj"
   printf 'TARGET_BRANCH=bbb\n' > "$ws/proj/.pbx.conf"
   PBX_TARGET_BRANCH=ccc load_config "proj"
@@ -59,10 +60,21 @@ test_env_wins() {
   rm -rf "$ws"
 }
 
+test_load_config_errexit_safe() {
+  local ws; ws="$(make_ws)"; mkdir -p "$ws/proj"
+  # Запускаем в свежем bash с set -e: load_config без PBX_FORGE не должен ронять скрипт.
+  local out
+  out="$(env -u PBX_FORGE -u PBX_BASE_BRANCH -u PBX_TARGET_BRANCH -u PBX_DEFAULT_ENV \
+        bash -c 'set -euo pipefail; source "'"$PBX"'"; WORKSPACE="'"$ws"'"; load_config proj; echo REACHED' 2>&1)"
+  assert_eq "load_config не падает под set -e (нет PBX_FORGE)" "$out" "REACHED"
+  rm -rf "$ws"
+}
+
 test_source_no_run
 test_defaults
 test_project_over_global
 test_env_wins
+test_load_config_errexit_safe
 
 echo "--- Итог: PASS=$PASS FAIL=$FAIL ---"
 [[ $FAIL -eq 0 ]]
