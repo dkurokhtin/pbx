@@ -217,17 +217,20 @@ cmd_pack() {
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
+  # Push-опции gitlab и --title у gh не допускают переводов строк — в заголовок
+  # берём только первую строку (тело коммита сохранено в самом коммите/--body).
+  local title="${msg%%$'\n'*}"
   case "$FORGE" in
     gitlab)
       git push -o merge_request.create \
                -o merge_request.target="$TARGET_BRANCH" \
-               -o merge_request.title="$msg" \
+               -o merge_request.title="$title" \
                origin "$branch"
       ;;
     github)
       git push origin "$branch"
       gh pr create --base "$TARGET_BRANCH" --head "$branch" \
-                   --title "$msg" --body "$msg"
+                   --title "$title" --body "$msg"
       ;;
     none)
       git push origin "$branch"

@@ -384,6 +384,14 @@ test_forge_gitlab() {
   assert_has "gitlab: push origin ветка"    "$out" "origin feature/X-1"
   rm -f "$CALLS"
 }
+test_forge_gitlab_multiline_title() {
+  CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="dev"
+  forge_push "feature/X-9" "$(printf 'заголовок\nтело строка 2\nтело строка 3')"
+  local out; out="$(cat "$CALLS")"
+  assert_has "gitlab multiline: title = первая строка" "$out" "merge_request.title=заголовок"
+  assert_no  "gitlab multiline: тела строк нет в push-опциях" "$out" "тело строка 2"
+  rm -f "$CALLS"
+}
 test_forge_github() {
   CALLS="$(mktemp)"; FORGE="github"; TARGET_BRANCH="main"
   forge_push "feature/X-2" "second"
@@ -528,6 +536,7 @@ test_valid_project_registry_elsewhere
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }
 gh()  { printf 'gh %s\n'  "$*" >> "$CALLS"; }
 test_forge_gitlab
+test_forge_gitlab_multiline_title
 test_forge_github
 test_forge_none
 unset -f git gh
