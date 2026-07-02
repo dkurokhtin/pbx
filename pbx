@@ -9,9 +9,9 @@
 #
 #  Команды:
 #    pbx pack    <проект>
-#    pbx deliver <проект> <ветка> <сообщение> [архив]
+#    pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
 #    pbx deploy  <проект> [env]
-#    pbx ship    <проект> <ветка> <сообщение> [env]
+#    pbx ship    <проект> <ветка> <сообщение> [env] [--yes]
 #    pbx list
 #    pbx help
 #
@@ -265,8 +265,19 @@ forge_push() {
 # Распаковать архив в репозиторий, создать ветку от BASE_BRANCH, закоммитить и
 # запушить с созданием MR/PR в TARGET_BRANCH (по умолчанию dev; настраивается).
 cmd_deliver() {
+  # --yes / -y (в любой позиции) или PBX_ASSUME_YES=1 — пропустить guard-подтверждение
+  local assume_yes="${PBX_ASSUME_YES:-0}"
+  local _a _args=()
+  for _a in "$@"; do
+    case "$_a" in
+      --yes|-y) assume_yes=1 ;;
+      *)        _args+=("$_a") ;;
+    esac
+  done
+  set -- ${_args[@]+"${_args[@]}"}
+
   local project branch msg archive
-  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив]}")"
+  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]}")"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
   archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
@@ -325,6 +336,28 @@ cmd_deliver() {
     git branch -d "$branch"
     return 0
   fi
+
+  # ---- guard: показать changeset и подтвердить перед commit/push -------------
+  # Ловит «зеркальную» доставку от устаревшего снимка: rsync --delete молча
+  # откатывает/удаляет чужую влитую в BASE_BRANCH работу. Обход: --yes / PBX_ASSUME_YES=1.
+  c_blue "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
+  git diff --cached --stat
+  local deleted f; deleted="$(git diff --cached --diff-filter=D --name-only)"
+  if [[ -n "$deleted" ]]; then
+    c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
+    while IFS= read -r f; do c_warn "     - $f"; done <<< "$deleted"
+  fi
+  if [[ "$assume_yes" == 1 ]]; then
+    c_warn "   (--yes / PBX_ASSUME_YES — подтверждение пропущено)"
+  elif [[ -t 0 ]]; then
+    local ans=""
+    read -r -p "Проверь список выше. Продолжить коммит и пуш MR? [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]] \
+      || die "Отменено. Ты на ветке '$branch'; проверь diff, затем откати: git checkout -f $BASE_BRANCH && git branch -D $branch"
+  else
+    die "Доставка прервана (не интерактивно, без подтверждения). Проверь diff выше; если всё верно — повтори с --yes."
+  fi
+
   git commit -m "$msg"
   forge_push "$branch" "$msg"
 
@@ -355,8 +388,19 @@ cmd_deploy() {
 # ---- ship ------------------------------------------------------------------
 # Полный конвейер: pack → deliver → deploy.
 cmd_ship() {
+  # --yes / -y — вынуть и прокинуть в deliver (иначе guard остановит неинтерактивный ship)
+  local yesflag=()
+  local _a _args=()
+  for _a in "$@"; do
+    case "$_a" in
+      --yes|-y) yesflag=(--yes) ;;
+      *)        _args+=("$_a") ;;
+    esac
+  done
+  set -- ${_args[@]+"${_args[@]}"}
+
   local project branch msg env
-  project="$(strip_cr "${1:?Использование: pbx ship <проект> <ветка> <сообщение> [env]}")"
+  project="$(strip_cr "${1:?Использование: pbx ship <проект> <ветка> <сообщение> [env] [--yes]}")"
   load_config "$project"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
@@ -364,7 +408,7 @@ cmd_ship() {
 
   c_blue "🚀 ship $project → ветка '$branch', env '$env'"
   cmd_pack "$project"
-  cmd_deliver "$project" "$branch" "$msg" "$PBX_LAST_ARCHIVE"
+  cmd_deliver "$project" "$branch" "$msg" "$PBX_LAST_ARCHIVE" ${yesflag[@]+"${yesflag[@]}"}
   cmd_deploy "$project" "$env"
   c_green "🎉 Готово: $project доставлен и задеплоен ($env)."
 }
@@ -446,10 +490,11 @@ cmd_help() {
 pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
-  pbx deliver <проект> <ветка> <сообщение> [архив]
+  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
+                                                перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
   pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
-  pbx ship    <проект> <ветка> <сообщение> [env]  всё сразу: pack → deliver → deploy
+  pbx ship    <проект> <ветка> <сообщение> [env] [--yes]  всё сразу: pack → deliver → deploy
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
@@ -468,6 +513,7 @@ pbx — доставка проектов Pybotx (WSL)
   PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
   PBX_TARGET_BRANCH (=dev)     PBX_DEFAULT_ENV (=dev)  PBX_FORGE (=gitlab)
+  PBX_ASSUME_YES (=0)          пропустить подтверждение deliver-guard (как --yes)
 
 Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
   BASE_BRANCH=dev            от какой ветки ответвляемся

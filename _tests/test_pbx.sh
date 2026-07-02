@@ -363,7 +363,7 @@ test_deliver_uses_repo() {
   printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
     "$src" "$repo" > "$reg/proj.conf"
 
-  cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" >/dev/null 2>&1
+  cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" --yes >/dev/null 2>&1
   assert_eq "deliver снял RETURN-trap (ship не упадёт)" "$(trap -p RETURN)" ""
 
   assert_eq "deliver: файл синкнут в REPO" "$(cat "$repo/file.txt")" "new"
@@ -371,6 +371,46 @@ test_deliver_uses_repo() {
   local pushed; pushed="$(git -C "$remote" branch --list feature/T-1)"
   assert_has "deliver: ветка запушена в remote" "$pushed" "feature/T-1"
   cd "$HERE"   # cmd_deliver сделал cd "$repo" в текущем шелле — вернуться перед rm -rf
+  rm -rf "$base" "$reg"
+}
+
+# --- Guard: не дать зеркальной доставке молча снести чужую работу ------------
+test_deliver_guard_blocks_deletions() {
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES
+
+  git init -q --bare "$remote"
+  git init -q "$repo"
+  ( cd "$repo" \
+    && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" \
+    && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt \
+    && git add -A && git commit -q -m init \
+    && git push -q -u origin dev ) >/dev/null 2>&1
+
+  # снимок УСТАРЕЛ: в нём нет roles.txt → rsync --delete удалит его (имитация факапа)
+  mkdir -p "$src"; echo keep > "$src/file.txt"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$src" "$repo" > "$reg/proj.conf"
+
+  # без --yes и без TTY (stdin </dev/null) → guard должен прервать (rc≠0), НЕ пушить
+  local rc=0
+  ( cmd_deliver "proj" "feature/T-2" "msg" "$dist/proj.tar.gz" </dev/null >/dev/null 2>&1 ) || rc=$?
+  assert_eq "guard: доставка с удалением без --yes прервана (rc=1)" "$rc" "1"
+  assert_eq "guard: ветка НЕ запушена при отмене" "$(git -C "$remote" branch --list feature/T-2)" ""
+
+  # с --yes guard пропускает — доставка проходит и пушится (даже с удалением)
+  ( cmd_deliver "proj" "feature/T-3" "msg" "$dist/proj.tar.gz" --yes </dev/null >/dev/null 2>&1 )
+  assert_has "guard: --yes пропускает доставку (ветка запушена)" \
+    "$(git -C "$remote" branch --list feature/T-3)" "feature/T-3"
+
+  cd "$HERE"
   rm -rf "$base" "$reg"
 }
 
@@ -567,6 +607,7 @@ test_exclude_builders_errexit_safe
 test_pack_e2e
 test_pack_e2e_registry
 test_deliver_uses_repo
+test_deliver_guard_blocks_deletions
 test_add_creates_entry
 test_add_refuses_overwrite
 test_valid_project_registry_elsewhere
