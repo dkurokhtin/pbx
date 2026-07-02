@@ -60,7 +60,7 @@ load_config() {
   # 1) встроенные дефолты
   BASE_BRANCH="dev"; TARGET_BRANCH="dev"; FORGE="gitlab"
   EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=()
-  SRC=""; REPO=""
+  SRC=""; REPO=""; MIRROR=""
   # 2) глобальный конфиг
   [[ -f "$WORKSPACE/.pbx.conf" ]] && source "$WORKSPACE/.pbx.conf"
   # 3) реестр проекта (центральный)
@@ -74,12 +74,13 @@ load_config() {
   [[ -n "${PBX_BASE_BRANCH:-}"   ]] && BASE_BRANCH="$PBX_BASE_BRANCH"
   [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
   [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
+  [[ -n "${PBX_MIRROR:-}"        ]] && MIRROR="$PBX_MIRROR"
   # 6) финализация путей (fallback)
   SRC="${SRC:-$WORKSPACE/$project}"
   REPO="${REPO:-$PROJECTS_ROOT/$project}"
   # 7) защита от CRLF (конфиги на /mnt/c часто с \r), включая SRC/REPO
   local __v __i
-  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO; do
+  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO MIRROR; do
     printf -v "$__v" '%s' "${!__v//$'\r'/}"
   done
   for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
@@ -500,6 +501,36 @@ cmd_status() {
   done
   return 0
 }
+
+# =============================================================================
+#  push (Э2): снапшот РАБОЧЕГО ДЕРЕВА SRC → ветка личного GitHub-зеркала.
+#  Механика проверена вживую (см. спеку §4): теневой индекс поверх КОПИИ
+#  реального, commit-tree с parent-chain, push БЕЗ --force.
+#  SRC (HEAD/индекс/staging/stash/.git/config) не трогаем НИГДЕ.
+# =============================================================================
+
+# Транслирует pack_exclude_args() (единственный источник истины об исключениях)
+# в git-pathspec той же unanchored-семантики, что tar --exclude.
+# ВАЖНО (воспроизведено): короткая форма ':!ИМЯ' падает fatal-ом на именах с
+# ведущим '_' (__pycache__: "Unimplemented pathspec magic '_'") — только длинная
+# ':(glob,exclude)'. Без '**/' матч только на верхнем уровне (вложенные
+# node_modules утекли бы) — нужны ОБЕ формы: '**/ИМЯ' и '**/ИМЯ/**'.
+pack_exclude_pathspecs() {
+  local line name
+  while IFS= read -r line; do
+    [[ "$line" == --exclude=* ]] || continue
+    name="${line#--exclude=}"
+    [[ -n "$name" ]] || continue
+    [[ "$name" == ".git" ]] && continue   # git add сам никогда не тронет .git
+    printf ':(glob,exclude)**/%s\n' "$name"
+    printf ':(glob,exclude)**/%s/**\n' "$name"
+  done < <(pack_exclude_args)
+  return 0
+}
+
+# Полный 40-hex SHA? Перед КАЖДЫМ push обязательна: пустой src-ref в refspec
+# (git push M "":refs/heads/B) — это синтаксис УДАЛЕНИЯ ветки на remote.
+_pbx_is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {

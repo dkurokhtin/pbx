@@ -748,6 +748,53 @@ test_pad_helpers_multibyte() {
   assert_eq "padr: правое выравнивание" "$out" "  5|"
 }
 
+# --- Э2: pathspec-исключения, SHA-валидация, MIRROR ------------------------------
+test_pack_exclude_pathspecs_forms() {
+  EXTRA_PACK_EXCLUDES=()
+  local out; out="$(pack_exclude_pathspecs)"
+  assert_has "pathspec: длинная форма node_modules"    "$out" ":(glob,exclude)**/node_modules"
+  assert_has "pathspec: содержимое node_modules"       "$out" ":(glob,exclude)**/node_modules/**"
+  assert_has "pathspec: __pycache__ длинной формой"    "$out" ":(glob,exclude)**/__pycache__"
+  assert_no  "pathspec: .git не эмитится"              "$out" "**/.git"
+  assert_no  "pathspec: короткой формы :! нет"         "$out" ":!"
+}
+
+test_pack_exclude_pathspecs_extra() {
+  EXTRA_PACK_EXCLUDES=("dist")
+  local out; out="$(pack_exclude_pathspecs)"
+  assert_has "pathspec: EXTRA dist"            "$out" ":(glob,exclude)**/dist"
+  assert_has "pathspec: EXTRA dist содержимое" "$out" ":(glob,exclude)**/dist/**"
+  EXTRA_PACK_EXCLUDES=()
+}
+
+test_pbx_is_sha() {
+  local rc=0
+  _pbx_is_sha "0123456789abcdef0123456789abcdef01234567" || rc=$?
+  assert_eq "sha: валидный 40-hex → 0" "$rc" "0"
+  rc=0; _pbx_is_sha "" || rc=$?
+  assert_eq "sha: пустая строка → 1" "$rc" "1"
+  rc=0; _pbx_is_sha "abc" || rc=$?
+  assert_eq "sha: короткая → 1" "$rc" "1"
+  rc=0; _pbx_is_sha "0123456789ABCDEF0123456789abcdef01234567" || rc=$?
+  assert_eq "sha: верхний регистр → 1" "$rc" "1"
+}
+
+test_load_config_mirror() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_MIRROR
+  mkdir -p "$ws/proj"
+  printf 'MIRROR=git@github.com:me/proj.git\r\n' > "$reg/proj.conf"   # с CRLF
+  load_config proj
+  assert_eq "MIRROR из реестра, без CR" "$MIRROR" "git@github.com:me/proj.git"
+  PBX_MIRROR="https://x/y.git" load_config proj
+  assert_eq "env PBX_MIRROR побеждает" "$MIRROR" "https://x/y.git"
+  unset PBX_MIRROR
+  load_config nonexistent-proj-xyz
+  assert_eq "MIRROR дефолт — пусто" "$MIRROR" ""
+  rm -rf "$ws" "$reg"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -1186,6 +1233,10 @@ test_status_json_sentinels_nongit
 test_status_table_pipe_no_ansi
 test_status_unknown_project_dies
 test_pad_helpers_multibyte
+test_pack_exclude_pathspecs_forms
+test_pack_exclude_pathspecs_extra
+test_pbx_is_sha
+test_load_config_mirror
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo
