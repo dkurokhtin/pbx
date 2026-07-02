@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (8) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (9) завершает без действий
   local rc=0
-  ( printf '8\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» → rc=0" "$rc" "0"
+  ( printf '9\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (9) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -427,6 +427,24 @@ test_menu_cancel_returns_cleanly() {
   local rc=0
   ( printf 'q\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
   assert_eq "меню: отмена на первом экране → rc=0" "$rc" "0"
+}
+
+test_menu_status_returns_to_menu() {
+  local ws; ws="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  mkdir -p "$ws/proj"
+  # 4 = status → вывод → Enter (menu_pause) → 9 = выход
+  local out
+  out="$( ( printf '4\n\n9\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || true
+  assert_has "меню: status вызван" "$out" "Статус проектов"
+  # заголовок меню дважды: до status и после возврата (доказательство возврата)
+  assert_eq "меню: после status снова меню" \
+    "$(printf '%s' "$out" | grep -c 'что делаем')" "2"
+  rm -rf "$ws" "$reg"
 }
 
 # --- Guard достижим и fail-closed из меню (доставка через меню, вход-пайп) ------
@@ -1145,6 +1163,7 @@ test_menu_gate_no_menu_env
 test_menu_exit_item
 test_menu_pack_e2e
 test_menu_cancel_returns_cleanly
+test_menu_status_returns_to_menu
 test_menu_deliver_guard_fail_closed
 test_ui_raw_off_idempotent
 test_pack_excludes

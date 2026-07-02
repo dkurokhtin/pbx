@@ -1136,6 +1136,7 @@ cmd_menu() {
     'pack    — упаковать проект в архив'
     'deliver — доставить архив в репо (ветка + MR)'
     'log     — диагностика проекта'
+    'status  — сводка по проектам'
     'list    — список проектов'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
@@ -1148,11 +1149,12 @@ cmd_menu() {
       0) if menu_project_flow pack;    then return 0; fi ;;
       1) if menu_project_flow deliver; then return 0; fi ;;
       2) menu_project_flow log || true ;;
-      3) cmd_list; menu_pause ;;
-      4) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      5) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      6) cmd_help; menu_pause ;;
-      7) return 0 ;;
+      3) cmd_status; menu_pause ;;
+      4) cmd_list; menu_pause ;;
+      5) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      6) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      7) cmd_help; menu_pause ;;
+      8) return 0 ;;
     esac
   done
 }
