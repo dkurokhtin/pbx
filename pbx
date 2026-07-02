@@ -720,6 +720,90 @@ menu_select_plain() {
   done
 }
 
+# ---- raw-режим терминала -------------------------------------------------------
+# Ctrl+C/Ctrl+Z читаем байтами (-isig): отмена = данные, не сигнал.
+UI_STTY_SAVED=''
+ui_raw_on() {
+  UI_STTY_SAVED="$(stty -g 2>/dev/null)" || { UI_STTY_SAVED=''; return 1; }
+  [[ -n "$UI_STTY_SAVED" ]] || return 1
+  if ! stty -echo -icanon -isig min 1 time 0 2>/dev/null; then
+    stty "$UI_STTY_SAVED" 2>/dev/null || true
+    UI_STTY_SAVED=''
+    return 1
+  fi
+  printf '\033[?25l' >&2   # спрятать курсор
+  return 0
+}
+ui_raw_off() {
+  if [[ -n "${UI_STTY_SAVED:-}" ]]; then
+    stty "$UI_STTY_SAVED" 2>/dev/null || true
+    UI_STTY_SAVED=''
+    printf '\033[?25h' >&2   # показать курсор
+  fi
+  return 0
+}
+
+# menu_select <заголовок> <пункт...> — стрелочное меню.
+# Рисует в stderr; индекс в stdout; rc: 0 выбор, 130 отмена.
+# Клавиши: ↑/↓ (ESC[A/B и ESCOA/B), k/j, 1-9 — прыжок+выбор, Enter, Esc/q/Ctrl+C.
+menu_select() {
+  local title="$1"; shift
+  local -a opts=("$@")
+  local n=${#opts[@]} cur=0 drawn=0 key seq i
+  (( n > 0 )) || return 130
+  if ! ui_raw_on; then
+    menu_select_plain "$title" "${opts[@]}"
+    return $?
+  fi
+  while :; do
+    if (( drawn )); then printf '\033[%dA' "$((n+2))" >&2; fi
+    drawn=1
+    printf '\r\033[K%s%s%s\n' "$C_BOLD$C_BLUE" "$title" "$C_RESET" >&2
+    printf '\r\033[K%s%s%s\n' "$C_GREY" "$G_HR" "$C_RESET" >&2
+    for i in "${!opts[@]}"; do
+      if (( i == cur )); then
+        printf '\r\033[K %s%s %s%s\n' "$C_BOLD$C_CYAN" "$G_PTR" "${opts[i]}" "$C_RESET" >&2
+      else
+        printf '\r\033[K   %s\n' "${opts[i]}" >&2
+      fi
+    done
+    IFS= read -rsn1 key || { ui_raw_off; return 130; }
+    case "$key" in
+      $'\x1b')                                  # ESC: стрелка или голый Esc
+        seq=''
+        IFS= read -rsn1 -t 0.05 seq || true
+        if [[ "$seq" == '[' || "$seq" == 'O' ]]; then
+          IFS= read -rsn1 -t 0.05 seq || true
+          case "$seq" in
+            A) cur=$(( (cur - 1 + n) % n )) ;;
+            B) cur=$(( (cur + 1) % n )) ;;
+          esac
+        else
+          ui_raw_off; return 130                 # голый Esc = отмена
+        fi
+        ;;
+      k) cur=$(( (cur - 1 + n) % n )) ;;
+      j) cur=$(( (cur + 1) % n )) ;;
+      [1-9])
+        if (( key <= n )); then
+          cur=$((key - 1))
+          ui_raw_off
+          printf '%s\n' "$cur"
+          return 0
+        fi
+        ;;
+      q|$'\x03'|$'\x04')                         # q / Ctrl+C / Ctrl+D
+        ui_raw_off; return 130
+        ;;
+      ''|$'\n'|$'\r')                            # Enter
+        ui_raw_off
+        printf '%s\n' "$cur"
+        return 0
+        ;;
+    esac
+  done
+}
+
 # ---- диспетчер -------------------------------------------------------------
 main() {
   local cmd="${1:-help}"; shift || true

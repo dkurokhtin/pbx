@@ -375,6 +375,20 @@ test_menu_select_plain_invalid_then_valid() {
   assert_eq "plain-меню: мусор/вне диапазона переспрашивается" "$out" "0"
 }
 
+# --- Task 7: raw-обвязка + menu_select со стрелками -----------------------
+test_menu_select_falls_back_to_plain() {
+  # stdin — пайп → stty провалится → должен отработать plain-путь
+  local out rc=0
+  out="$(printf '1\n' | { source "$PBX"; menu_select "t" one two; } 2>/dev/null)" || rc=$?
+  assert_eq "menu_select: fallback в plain, выбор 1 → 0" "$out" "0"
+  assert_eq "menu_select: rc=0" "$rc" "0"
+}
+test_ui_raw_off_idempotent() {
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; ui_raw_off; ui_raw_off; echo REACHED' 2>/dev/null)"
+  assert_eq "ui_raw_off дважды не падает под set -e" "$out" "REACHED"
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -820,6 +834,8 @@ test_menu_select_plain_choice
 test_menu_select_plain_cancel
 test_menu_select_plain_eof
 test_menu_select_plain_invalid_then_valid
+test_menu_select_falls_back_to_plain
+test_ui_raw_off_idempotent
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
