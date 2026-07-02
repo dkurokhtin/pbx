@@ -720,6 +720,16 @@ test_status_unknown_project_dies() {
   rm -rf "$reg" "$ws"
 }
 
+test_pad_helpers_multibyte() {
+  local out
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; pad "абв…" 8; printf "|"')"
+  assert_eq "pad: многобайтовое по символам" "$out" "абв…    |"
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; pad "longer-than-width" 5; printf "|"')"
+  assert_eq "pad: длиннее ширины — не режет" "$out" "longer-than-width|"
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; padr "5" 3; printf "|"')"
+  assert_eq "padr: правое выравнивание" "$out" "  5|"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -1120,6 +1130,7 @@ test_status_json_valid_and_pure
 test_status_json_sentinels_nongit
 test_status_table_pipe_no_ansi
 test_status_unknown_project_dies
+test_pad_helpers_multibyte
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant

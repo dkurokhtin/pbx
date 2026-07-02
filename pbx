@@ -388,6 +388,11 @@ status_collect() {
 # экранирование строки для ручной JSON-сборки (jq в системе нет)
 _json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
 
+# Выравнивание по СИМВОЛАМ, не байтам: printf %-Ns считает байты — кириллица/…/— ломают колонки
+# (local в два шага: n=${#t} в одной строке с local t=… падает под set -u — expansion раньше присваивания)
+pad()  { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%s%*s' "$t" $((w - n)) ''; fi; }
+padr() { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%*s%s' $((w - n)) '' "$t"; fi; }
+
 # человекочитаемая метка дрейфа по ST_* текущего проекта
 status_drift_label() {
   if [[ "$ST_SRC_EXISTS" == false ]]; then printf 'нет SRC'; return 0; fi
@@ -470,7 +475,11 @@ cmd_status() {
     local dirty_disp="$ST_DIRTY"; [[ "$dirty_disp" == -1 ]] && dirty_disp='—'
     local arch_disp='—'
     if [[ "$ST_ARCHIVE_EXISTS" == true ]]; then
-      arch_disp="$ST_ARCHIVE_SIZE $(date -d "@$ST_ARCHIVE_MTIME" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+      if [[ "$ST_ARCHIVE_MTIME" != -1 ]]; then
+        arch_disp="$ST_ARCHIVE_SIZE $(date -d "@$ST_ARCHIVE_MTIME" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+      else
+        arch_disp="$ST_ARCHIVE_SIZE ?"
+      fi
     fi
     color=''; reset=''
     if (( UI_COLOR_OUT )); then
@@ -479,8 +488,9 @@ cmd_status() {
       elif [[ "$drift" == "$G_OK "* ]]; then color="$C_GREEN"
       else color="$C_DIM"; fi
     fi
-    printf '  %-14s %-24s %5s  %-14s %s%s%s\n' \
-      "$p" "$b" "$dirty_disp" "$arch_disp" "$color" "$drift" "$reset"
+    printf '  %s %s %s  %s %s%s%s\n' \
+      "$(pad "$p" 14)" "$(pad "$b" 24)" "$(padr "$dirty_disp" 5)" "$(pad "$arch_disp" 14)" \
+      "$color" "$drift" "$reset"
     if [[ "$ST_REPO_EXISTS" == true && -e "$ST_REPO/.git" ]]; then
       local rb rstate
       rb="$(git -C "$ST_REPO" branch --show-current 2>/dev/null || echo '?')"
