@@ -34,10 +34,10 @@ PBX_SCAN_MAX_DEPTH="${PBX_SCAN_MAX_DEPTH:-4}"
 # ============================================================================
 
 # ---- вывод -----------------------------------------------------------------
-c_blue()  { printf '\033[34m%s\033[0m\n' "$*"; }
-c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
-c_red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
-c_warn()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+c_blue()  { if (( ${UI_COLOR_OUT:-0} )); then printf '\033[34m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
+c_green() { if (( ${UI_COLOR_OUT:-0} )); then printf '\033[32m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
+c_red()   { if (( ${UI_COLOR_ERR:-0} )); then printf '\033[31m%s\033[0m\n' "$*" >&2; else printf '%s\n' "$*" >&2; fi; }
+c_warn()  { if (( ${UI_COLOR_ERR:-0} )); then printf '\033[33m%s\033[0m\n' "$*" >&2; else printf '%s\n' "$*" >&2; fi; }
 die() {
   c_red "❌ $*"
   # Авто-захват диагностики для ИИ-агента: только если известен проект
@@ -190,10 +190,28 @@ list_projects() {
 }
 
 cmd_list() {
-  c_blue "🔵 Проекты (реестр ∪ WORKSPACE):"
-  local any=0 p
-  while IFS= read -r p; do c_green "  • $p"; any=1; done < <(list_projects)
-  [[ "$any" -eq 1 ]] || c_warn "  (проектов не найдено)"
+  # Пайп/агенты: стабильный machine-readable формат — голые имена по строке.
+  if (( ! UI_COLOR_OUT )); then
+    list_projects
+    return 0
+  fi
+  # TTY: таблица со статусами. load_config мутирует глобали — cmd_list терминальна.
+  ui_section "Проекты (реестр ∪ WORKSPACE)"
+  local p mark arch info any=0
+  while IFS= read -r p; do
+    any=1
+    load_config "$p"
+    if [[ -d "$SRC" ]]; then mark="${C_GREEN}${G_OK}${C_RESET}"; else mark="${C_RED}${G_NO}${C_RESET}"; fi
+    arch="$DIST_DIR/$p.tar.gz"
+    if [[ -f "$arch" ]]; then
+      info="$(du -h "$arch" 2>/dev/null | awk '{print $1}'), $(date -r "$arch" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+    else
+      info="—"
+    fi
+    printf '  %-16s SRC %s  %sархив:%s %s\n' "$p" "$mark" "$C_DIM" "$C_RESET" "$info"
+  done < <(list_projects)
+  (( any )) || c_warn "  (проектов не найдено)"
+  return 0
 }
 
 # ---- exclude builders (pack/deliver) ---------------------------------------
@@ -234,10 +252,13 @@ cmd_pack() {
   mkdir -p "$DIST_DIR"
   local out="$DIST_DIR/$project.tar.gz"
 
-  c_blue "🔵 Упаковка $project ($SRC) → $out"
+  ui_section "Упаковка $project" "🔵 Упаковка $project ($SRC) → $out"
+  ui_kv SRC "$SRC"
+  ui_kv OUT "$out"
   local excludes; mapfile -t excludes < <(pack_exclude_args)
   tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
+  ui_dim "размер: $(du -h "$out" | awk '{print $1}')"
   c_green "✅ Архив готов: $out"
 }
 
@@ -308,7 +329,7 @@ cmd_deliver() {
   # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)
   git config core.fileMode false
 
-  c_blue "🔵 Обновляю $BASE_BRANCH"
+  ui_section "Обновляю $BASE_BRANCH"
   git checkout "$BASE_BRANCH"
   git pull origin "$BASE_BRANCH"
 
@@ -329,7 +350,7 @@ cmd_deliver() {
   fi
 
   # Полная синхронизация (сохраняем служебные файлы репозитория)
-  c_blue "🔵 Синхронизирую файлы в $repo"
+  ui_section "Синхронизирую файлы в $repo"
   local syncex; mapfile -t syncex < <(sync_exclude_args)
   rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
   rm -rf "$tmp"        # tmp больше не нужен после синка
@@ -348,18 +369,26 @@ cmd_deliver() {
   # ---- guard: показать changeset и подтвердить перед commit/push -------------
   # Ловит «зеркальную» доставку от устаревшего снимка: rsync --delete молча
   # откатывает/удаляет чужую влитую в BASE_BRANCH работу. Обход: --yes / PBX_ASSUME_YES=1.
-  c_blue "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
+  ui_section "Изменения к доставке" \
+    "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
+  ui_kv BRANCH "$branch"
+  ui_kv TARGET "$TARGET_BRANCH"
   git diff --cached --stat
   local deleted f; deleted="$(git diff --cached --diff-filter=D --name-only)"
   if [[ -n "$deleted" ]]; then
+    if (( UI_COLOR_ERR )); then
+      local ndel; ndel="$(printf '%s\n' "$deleted" | wc -l | tr -d ' ')"
+      printf '\033[1;31m%s удалений: %s\033[0m\n' "$G_NO" "$ndel" >&2
+    fi
     c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
     while IFS= read -r f; do c_warn "     - $f"; done <<< "$deleted"
   fi
   if [[ "$assume_yes" == 1 ]]; then
     c_warn "   (--yes / PBX_ASSUME_YES — подтверждение пропущено)"
   elif [[ -t 0 ]]; then
-    local ans=""
-    read -r -p "Проверь список выше. Продолжить коммит и пуш MR? [y/N] " ans
+    local ans="" prompt="Проверь список выше. Продолжить коммит и пуш MR? [y/N] "
+    if (( UI_COLOR_ERR )); then prompt=$'\033[1m'"$prompt"$'\033[0m'; fi
+    read -r -p "$prompt" ans
     [[ "$ans" =~ ^[Yy]$ ]] \
       || die "Отменено. Ты на ветке '$branch'; проверь diff, затем откати: git checkout -f $BASE_BRANCH && git branch -D $branch"
   else
@@ -373,6 +402,7 @@ cmd_deliver() {
     none) c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH' запушена (без MR/PR) — «$msg».";;
     *)    c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR/PR в '$TARGET_BRANCH' — «$msg».";;
   esac
+  ui_summary "$branch" "$TARGET_BRANCH" "${msg%%$'\n'*}"
 }
 
 # ---- log: диагностика для ИИ-агента ----------------------------------------
@@ -533,7 +563,8 @@ cmd_scan() {
 
 # ---- help ------------------------------------------------------------------
 cmd_help() {
-  cat <<'EOF'
+  if (( ! UI_COLOR_OUT )); then
+    cat <<'EOF'
 pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
@@ -574,11 +605,303 @@ pbx — доставка проектов Pybotx (WSL)
   плюс BASE_BRANCH/TARGET_BRANCH/FORGE/EXTRA_*.
   Проект берётся из реестра, иначе из $WORKSPACE/<имя> (SRC) и $PROJECTS_ROOT/<имя> (REPO).
 EOF
+    return 0
+  fi
+  cat <<EOF
+${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
+
+${C_BOLD}Команды${C_RESET}
+  ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
+  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes]
+                                          ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
+                                          ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
+  ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
+  ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
+  ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
+  ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
+  ${C_CYAN}pbx${C_RESET}                                 ${C_DIM}интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)${C_RESET}
+
+${C_BOLD}Примеры${C_RESET}
+  pbx pack sup
+  pbx deliver sup feature/SUBA-2147-fix-name "Описание изменений"
+  pbx log sup
+
+${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
+            ${C_DIM}PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES PBX_NO_MENU${C_RESET}
+
+${C_DIM}Конфиги и реестр: подробности в plain-справке (pbx help | cat) и README.${C_RESET}
+EOF
+}
+
+# =============================================================================
+#  UI: палитра, глифы, интерактивное меню.
+#  ВНИМАНИЕ (set -euo pipefail): арифметика с возможным 0 — только через
+#  x=$((...)) или `(( ... )) || true`; read всегда с `|| fallback`.
+#  Plain-режим (non-TTY/NO_COLOR/TERM=dumb) обязан быть байт-в-байт равен
+#  прежнему выводу минус ANSI — его парсят ИИ-агенты.
+# =============================================================================
+
+# ---- детект возможностей (top-level, без вывода и побочных эффектов) --------
+UI_COLOR_OUT=0; UI_COLOR_ERR=0; UI_TTY=0; UI_UTF8=0
+if [[ -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
+  [[ -t 1 ]] && UI_COLOR_OUT=1
+  [[ -t 2 ]] && UI_COLOR_ERR=1
+fi
+[[ -t 0 && -t 1 ]] && UI_TTY=1
+case "$(locale charmap 2>/dev/null || true)" in UTF-8|utf8) UI_UTF8=1 ;; esac
+
+# ---- палитра (пустые строки при выключенном цвете: printf-шаблоны едины) ----
+if (( UI_COLOR_OUT )); then
+  C_RESET=$'\033[0m'  C_BOLD=$'\033[1m'   C_DIM=$'\033[2m'
+  C_BLUE=$'\033[34m'  C_GREEN=$'\033[32m' C_RED=$'\033[31m'
+  C_YELLOW=$'\033[33m' C_CYAN=$'\033[36m' C_GREY=$'\033[90m'
+else
+  C_RESET='' C_BOLD='' C_DIM='' C_BLUE='' C_GREEN='' C_RED='' C_YELLOW='' C_CYAN='' C_GREY=''
+fi
+
+# ---- глифы (ASCII-fallback для не-UTF8 консолей) -----------------------------
+if (( UI_UTF8 )); then
+  G_PTR='▸' G_BAR='│' G_MID='├' G_END='└' G_OK='✓' G_NO='✗'
+  G_HR='──────────────────────────────────────────────'
+else
+  G_PTR='>' G_BAR='|' G_MID='+' G_END='+' G_OK='*' G_NO='x'
+  G_HR='----------------------------------------------'
+fi
+
+# ---- статические UI-хелперы --------------------------------------------------
+# ui_section <TTY-заголовок> [plain-строка]
+# TTY: стилизованная шапка; plain: ровно прежняя строка (по умолчанию "🔵 <заголовок>").
+ui_section() {
+  if (( UI_COLOR_OUT )); then
+    printf '\n%s%s %s%s\n%s%s%s\n' "$C_BOLD$C_BLUE" "$G_PTR" "$1" "$C_RESET" "$C_GREY" "$G_HR" "$C_RESET"
+  else
+    c_blue "${2:-🔵 $1}"
+  fi
+}
+
+# ui_kv <Latin-ключ> <значение> — только TTY-украшение (в plain строк не добавляем).
+ui_kv() {
+  (( UI_COLOR_OUT )) || return 0
+  printf '  %s%-8s%s %s\n' "$C_DIM" "$1" "$C_RESET" "$2"
+}
+
+# ui_dim <текст> — второстепенная dim-строка, только TTY.
+ui_dim() {
+  (( UI_COLOR_OUT )) || return 0
+  printf '  %s%s%s\n' "$C_DIM" "$*" "$C_RESET"
+}
+
+# ui_summary <ветка> <MR-цель> <сообщение> — итоговый блок доставки, только TTY.
+ui_summary() {
+  (( UI_COLOR_OUT )) || return 0
+  printf ' %s%s%s ветка      %s\n' "$C_GREY" "$G_BAR" "$C_RESET" "$1"
+  printf ' %s%s%s MR →       %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$2"
+  printf ' %s%s%s сообщение  %s\n' "$C_GREY" "$G_END" "$C_RESET" "$3"
+}
+
+# ---- интерактивное меню -------------------------------------------------------
+# menu_select_plain <заголовок> <пункт...> — нумерованный fallback без raw-режима.
+# Список/промпт в stderr; индекс (0-based) в stdout; rc: 0 выбор, 130 отмена/EOF.
+menu_select_plain() {
+  local title="$1"; shift
+  local -a opts=("$@")
+  local n=${#opts[@]} i choice
+  printf '%s\n' "$title" >&2
+  for i in "${!opts[@]}"; do printf '  %d) %s\n' "$((i+1))" "${opts[i]}" >&2; done
+  while :; do
+    printf 'Выбор [1-%d, q — отмена]: ' "$n" >&2
+    IFS= read -r choice || return 130
+    choice="$(strip_cr "$choice")"
+    [[ "$choice" == q ]] && return 130
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= n )); then
+      printf '%s\n' "$((10#$choice-1))"
+      return 0
+    fi
+  done
+}
+
+# ---- raw-режим терминала -------------------------------------------------------
+# Ctrl+C/Ctrl+Z читаем байтами (-isig): отмена = данные, не сигнал.
+UI_STTY_SAVED=''
+ui_raw_on() {
+  UI_STTY_SAVED="$(stty -g 2>/dev/null)" || { UI_STTY_SAVED=''; return 1; }
+  [[ -n "$UI_STTY_SAVED" ]] || return 1
+  if ! stty -echo -icanon -isig min 1 time 0 2>/dev/null; then
+    stty "$UI_STTY_SAVED" 2>/dev/null || true
+    UI_STTY_SAVED=''
+    return 1
+  fi
+  printf '\033[?25l' >&2   # спрятать курсор
+  return 0
+}
+ui_raw_off() {
+  if [[ -n "${UI_STTY_SAVED:-}" ]]; then
+    stty "$UI_STTY_SAVED" 2>/dev/null || true
+    UI_STTY_SAVED=''
+    printf '\033[?25h' >&2   # показать курсор
+  fi
+  return 0
+}
+
+# menu_select <заголовок> <пункт...> — стрелочное меню.
+# Рисует в stderr; индекс в stdout; rc: 0 выбор, 130 отмена.
+# Клавиши: ↑/↓ (ESC[A/B и ESCOA/B), k/j, 1-9 — прыжок+выбор, Enter, Esc/q/Ctrl+C.
+menu_select() {
+  local title="$1"; shift
+  local -a opts=("$@")
+  local n=${#opts[@]} cur=0 drawn=0 key seq i
+  (( n > 0 )) || return 130
+  if ! ui_raw_on; then
+    menu_select_plain "$title" "${opts[@]}"
+    return $?
+  fi
+  while :; do
+    if (( drawn )); then printf '\033[%dA' "$((n+2))" >&2; fi
+    drawn=1
+    printf '\r\033[K%s%s%s\n' "$C_BOLD$C_BLUE" "$title" "$C_RESET" >&2
+    printf '\r\033[K%s%s%s\n' "$C_GREY" "$G_HR" "$C_RESET" >&2
+    for i in "${!opts[@]}"; do
+      if (( i == cur )); then
+        printf '\r\033[K %s%s %s%s\n' "$C_BOLD$C_CYAN" "$G_PTR" "${opts[i]}" "$C_RESET" >&2
+      else
+        printf '\r\033[K   %s\n' "${opts[i]}" >&2
+      fi
+    done
+    IFS= read -rsn1 key || { ui_raw_off; return 130; }
+    case "$key" in
+      $'\x1b')                                  # ESC: стрелка или голый Esc
+        seq=''
+        IFS= read -rsn1 -t 0.05 seq || true
+        if [[ "$seq" == '[' || "$seq" == 'O' ]]; then
+          IFS= read -rsn1 -t 0.05 seq || true
+          case "$seq" in
+            A) cur=$(( (cur - 1 + n) % n )) ;;
+            B) cur=$(( (cur + 1) % n )) ;;
+          esac
+        else
+          ui_raw_off; return 130                 # голый Esc = отмена
+        fi
+        ;;
+      k) cur=$(( (cur - 1 + n) % n )) ;;
+      j) cur=$(( (cur + 1) % n )) ;;
+      [1-9])
+        if (( key <= n )); then
+          cur=$((key - 1))
+          ui_raw_off
+          printf '%s\n' "$cur"
+          return 0
+        fi
+        ;;
+      q|$'\x03'|$'\x04')                         # q / Ctrl+C / Ctrl+D
+        ui_raw_off; return 130
+        ;;
+      ''|$'\n'|$'\r')                            # Enter
+        ui_raw_off
+        printf '%s\n' "$cur"
+        return 0
+        ;;
+    esac
+  done
+}
+
+# ---- экраны меню ----------------------------------------------------------------
+menu_pause() {
+  printf '%s' "Enter — в меню " >&2
+  IFS= read -r _ || true
+  return 0
+}
+
+# menu_project_flow <pack|deliver|log>: выбор проекта → параметры → вызов cmd_*.
+# rc=0 — команда выполнена, выйти из меню; rc=1 — вернуться в меню.
+menu_project_flow() {
+  local action="$1" idx project branch msg
+  local -a projects=()
+  mapfile -t projects < <(list_projects)
+  if (( ${#projects[@]} == 0 )); then
+    c_warn "(проектов не найдено — заведи: pbx add / pbx scan)"
+    return 1
+  fi
+  idx="$(menu_select "Проект:" "${projects[@]}")" || return 1
+  project="${projects[idx]}"
+  case "$action" in
+    pack)
+      cmd_pack "$project"
+      return 0
+      ;;
+    log)
+      cmd_log "$project"
+      menu_pause
+      return 1
+      ;;
+    deliver)
+      if [[ -t 0 ]]; then
+        read -e -r -i "feature/" -p "Ветка: " branch || return 1
+      else
+        printf 'Ветка: ' >&2
+        IFS= read -r branch || return 1
+      fi
+      branch="$(strip_cr "$branch")"
+      if [[ -z "$branch" || "$branch" == "feature/" ]]; then
+        c_warn "(ветка не задана — отмена)"
+        return 1
+      fi
+      printf 'Сообщение коммита: ' >&2
+      IFS= read -r msg || return 1
+      msg="$(strip_cr "$msg")"
+      if [[ -z "$msg" ]]; then
+        c_warn "(сообщение пустое — отмена)"
+        return 1
+      fi
+      ui_dim "→ pbx deliver $project $branch \"$msg\""
+      cmd_deliver "$project" "$branch" "$msg"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+cmd_menu() {
+  require_wsl
+  trap 'ui_raw_off' EXIT          # страховка: терминал не остаётся в raw при любом выходе
+  trap 'ui_raw_off; exit 130' INT TERM
+  local idx
+  local -a items=(
+    'pack    — упаковать проект в архив'
+    'deliver — доставить архив в репо (ветка + MR)'
+    'log     — диагностика проекта'
+    'list    — список проектов'
+    'scan    — заполнить реестр (подсказка)'
+    'add     — добавить проект (подсказка)'
+    'help    — справка'
+    'выход'
+  )
+  while :; do
+    idx="$(menu_select "pbx — что делаем?" "${items[@]}")" || { printf '\n' >&2; return 0; }
+    case "$idx" in
+      0) if menu_project_flow pack;    then return 0; fi ;;
+      1) if menu_project_flow deliver; then return 0; fi ;;
+      2) menu_project_flow log || true ;;
+      3) cmd_list; menu_pause ;;
+      4) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      5) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      6) cmd_help; menu_pause ;;
+      7) return 0 ;;
+    esac
+  done
 }
 
 # ---- диспетчер -------------------------------------------------------------
 main() {
-  local cmd="${1:-help}"; shift || true
+  if (( $# == 0 )); then
+    if (( UI_TTY )) && [[ -z "${PBX_NO_MENU:-}" ]] \
+       && [[ -n "${TERM:-}" && "${TERM:-}" != dumb && "${TERM:-}" != unknown ]]; then
+      cmd_menu
+    else
+      cmd_help
+    fi
+    return 0
+  fi
+  local cmd="$1"; shift || true
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;

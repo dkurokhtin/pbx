@@ -47,6 +47,20 @@ flowchart LR
     pbx log     [имя]                                 диагностика для ИИ-агента (stdout + лог-файл)
     pbx help
 
+## Интерактивное меню
+
+Голый `pbx` в терминале открывает меню: стрелки ↑/↓ (или j/k, или цифры),
+Enter — выбрать, Esc/q — отмена. Пункты pack/deliver/log ведут через выбор
+проекта; deliver дальше спросит ветку (подставит `feature/`) и сообщение —
+и выполнит обычный `pbx deliver` со всеми страховками (guard остаётся).
+
+Меню включается только когда stdin и stdout — терминал. Скрипты и ИИ-агенты
+ничего не заметят: `pbx` без аргументов в пайпе печатает справку, как раньше.
+Отключить насовсем: `PBX_NO_MENU=1`.
+
+Цвет теперь гейтирован: в пайпе/редиректе вывод — чистый plain-текст
+(соблюдается `NO_COLOR`, `TERM=dumb`).
+
 ## Рабочий процесс
 
     # рабочая машина
@@ -100,7 +114,7 @@ Changes перед мержем**; удаления файлов, которых
 ## Переменные окружения
 
     PBX_WORKSPACE  PBX_PROJECTS_ROOT  PBX_DIST_DIR  PBX_REGISTRY_DIR
-    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_FORGE  PBX_IGNORE_DIRS  PBX_ASSUME_YES
+    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_FORGE  PBX_IGNORE_DIRS  PBX_ASSUME_YES  PBX_NO_MENU
 
 ## FORGE
 

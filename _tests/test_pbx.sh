@@ -28,6 +28,74 @@ mk_repo() { git init -q "$1"; git -C "$1" remote add origin "$2"; }
 mk_container() { git init -q "$1"; }
 
 # --- Task 1 -----------------------------------------------------------------
+# --- UI: гейт цвета и глифы ---------------------------------------------------
+test_color_gated_in_pipe() {
+  # stdout не TTY → ANSI-кодов быть не должно ни на stdout, ни на stderr
+  local reg; reg="$(make_ws)"
+  local out; out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" list 2>&1)"
+  assert_no "пайп: нет ANSI-кодов в list" "$out" $'\033'
+  local err; err="$(bash "$PBX" nosuchcmd 2>&1 >/dev/null)" || true
+  assert_no "пайп: нет ANSI-кодов на stderr (неизвестная команда)" "$err" $'\033'
+  rm -rf "$reg"
+}
+
+test_ui_flags_nontty() {
+  local out   # 2>/dev/null: при ручном запуске stderr — TTY, иначе UI_COLOR_ERR=1
+  out="$(bash -c 'source "'"$PBX"'"; printf "%s %s %s" "$UI_COLOR_OUT" "$UI_COLOR_ERR" "$UI_TTY"' 2>/dev/null)"
+  assert_eq "non-TTY: все UI-флаги нули" "$out" "0 0 0"
+}
+
+test_glyphs_ascii_fallback() {
+  local g
+  g="$(LC_ALL=C bash -c 'source "'"$PBX"'"; printf "%s%s%s" "$G_PTR" "$G_OK" "$G_BAR"')"
+  assert_eq "LC_ALL=C: ASCII-глифы" "$g" ">*|"
+  if locale -a 2>/dev/null | grep -qi 'C.UTF-8\|C.utf8'; then
+    g="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; printf "%s" "$G_PTR"')"
+    assert_eq "UTF-8: юникод-глиф курсора" "$g" "▸"
+  fi
+}
+
+test_c_funcs_respect_flags() {
+  # механизм гейта: c_* красят строго по UI_COLOR_* (TTY в CI не эмулируем,
+  # поэтому проверяем сам рычаг, форсируя флаги)
+  local out
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; c_blue hi')"
+  assert_has "UI_COLOR_OUT=1 → c_blue с ANSI" "$out" $'\033[34m'
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=0; c_blue hi')"
+  assert_eq  "UI_COLOR_OUT=0 → c_blue без ANSI" "$out" "hi"
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_ERR=1; c_warn hi' 2>&1 >/dev/null)"
+  assert_has "UI_COLOR_ERR=1 → c_warn с ANSI"  "$out" $'\033[33m'
+}
+
+# --- UI: хелперы и plain-инвариант pack ---------------------------------------
+test_ui_helpers_plain_silent() {
+  # в plain-режиме TTY-only хелперы молчат и не роняют set -e
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; ui_kv SRC /x; ui_dim hint; ui_summary b t m; echo REACHED')"
+  assert_eq "plain: ui_kv/ui_dim/ui_summary молчат, set -e жив" "$out" "REACHED"
+}
+
+test_ui_section_plain_invariant() {
+  local out
+  out="$(bash -c 'source "'"$PBX"'"; ui_section "Заголовок TTY" "🔵 Полная plain-строка"')"
+  assert_eq "plain: ui_section печатает вторую форму" "$out" "🔵 Полная plain-строка"
+  out="$(bash -c 'source "'"$PBX"'"; ui_section "Обновляю dev"')"
+  assert_eq "plain: ui_section по умолчанию 🔵 + заголовок" "$out" "🔵 Обновляю dev"
+}
+
+test_pack_plain_invariant() {
+  # байтовый инвариант: вывод pack в non-TTY идентичен прежнему (без ANSI)
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  local out; out="$(cmd_pack proj 2>&1)"
+  local expected
+  expected="$(printf '🔵 Упаковка proj (%s) → %s\n✅ Архив готов: %s' \
+    "$ws/proj" "$ws/_dist/proj.tar.gz" "$ws/_dist/proj.tar.gz")"
+  assert_eq "pack: plain-вывод байт-в-байт" "$out" "$expected"
+  rm -rf "$ws" "$reg"
+}
+
 test_source_no_run() {
   local out; out="$(bash -c 'source "'"$PBX"'"' 2>&1)"
   assert_eq "source не запускает main (пустой вывод)" "$out" ""
@@ -265,6 +333,136 @@ test_list_union() {
   rm -rf "$ws" "$reg"
 }
 
+test_list_pipe_bare_names() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_IGNORE_DIRS
+  mkdir -p "$ws/alpha" "$ws/beta"
+  local out; out="$(cmd_list 2>/dev/null)"
+  assert_eq "list в пайпе: голые имена по строке" "$out" "$(printf 'alpha\nbeta')"
+  rm -rf "$ws" "$reg"
+}
+
+test_help_plain_invariant() {
+  local out; out="$(bash "$PBX" help 2>&1)"
+  assert_has "help plain: шапка"        "$out" "pbx — доставка проектов Pybotx (WSL)"
+  assert_has "help plain: команда pack" "$out" "pbx pack    <проект>"
+  assert_has "help plain: реестр"       "$out" "Реестр проектов"
+  assert_no  "help plain: без ANSI"     "$out" $'\033'
+}
+
+# --- меню: plain-fallback ------------------------------------------------------
+test_menu_select_plain_choice() {
+  local out rc=0
+  out="$(printf '2\n' | { source "$PBX"; menu_select_plain "t" alpha beta gamma; })" || rc=$?
+  assert_eq "plain-меню: выбор 2 → индекс 1" "$out" "1"
+  assert_eq "plain-меню: rc=0" "$rc" "0"
+}
+test_menu_select_plain_cancel() {
+  local out rc=0
+  out="$(printf 'q\n' | { source "$PBX"; menu_select_plain "t" a b; })" || rc=$?
+  assert_eq "plain-меню: q → отмена rc=130" "$rc" "130"
+  assert_eq "plain-меню: stdout пуст при отмене" "$out" ""
+}
+test_menu_select_plain_eof() {
+  local rc=0
+  ( source "$PBX"; menu_select_plain "t" a b </dev/null >/dev/null 2>&1 ) || rc=$?
+  assert_eq "plain-меню: EOF → 130 (не виснет)" "$rc" "130"
+}
+test_menu_select_plain_invalid_then_valid() {
+  local out
+  out="$(printf 'x\n9\n1\n' | { source "$PBX"; menu_select_plain "t" a b; } 2>/dev/null)"
+  assert_eq "plain-меню: мусор/вне диапазона переспрашивается" "$out" "0"
+}
+test_menu_select_plain_leading_zero() {
+  local out err rc=0
+  err="$(mktemp)"
+  out="$(printf '08\n1\n' | { source "$PBX"; menu_select_plain "t" a b; } 2>"$err")" || rc=$?
+  assert_eq "plain-меню: «08» переспрашивается, затем 1 → 0" "$out" "0"
+  assert_no "plain-меню: нет octal-ошибки в stderr" "$(cat "$err")" "value too great for base"
+  rm -f "$err"
+}
+
+# --- Task 7: raw-обвязка + menu_select со стрелками -----------------------
+test_menu_select_falls_back_to_plain() {
+  # stdin — пайп → stty провалится → должен отработать plain-путь
+  local out rc=0
+  out="$(printf '1\n' | { source "$PBX"; menu_select "t" one two; } 2>/dev/null)" || rc=$?
+  assert_eq "menu_select: fallback в plain, выбор 1 → 0" "$out" "0"
+  assert_eq "menu_select: rc=0" "$rc" "0"
+}
+
+# --- меню: гейт и e2e -----------------------------------------------------------
+test_menu_gate_nontty_help() {
+  local out rc=0
+  out="$(bash "$PBX" </dev/null 2>&1)" || rc=$?
+  assert_eq "гейт: non-TTY голый pbx → rc=0"  "$rc" "0"
+  assert_has "гейт: non-TTY голый pbx → help" "$out" "pbx — доставка проектов Pybotx"
+}
+test_menu_gate_no_menu_env() {
+  local out   # TERM=xterm: гейт не должен отпасть по TERM — проверяем именно PBX_NO_MENU
+  out="$(printf '' | { source "$PBX"; UI_TTY=1; TERM=xterm PBX_NO_MENU=1 main; } 2>&1)"
+  assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
+}
+test_menu_exit_item() {
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (8) завершает без действий
+  local rc=0
+  ( printf '8\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» → rc=0" "$rc" "0"
+}
+test_menu_pack_e2e() {
+  local ws; ws="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  # 1 = pack; затем 1 = первый проект; plain-фолбэк меню читает пайп
+  ( printf '1\n1\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; DIST_DIR="$ws/_dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) >/dev/null 2>&1 || true
+  assert_has "меню e2e: pack создал архив" "$(ls "$ws/_dist" 2>/dev/null)" "proj.tar.gz"
+  rm -rf "$ws" "$reg"
+}
+test_menu_cancel_returns_cleanly() {
+  local rc=0
+  ( printf 'q\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: отмена на первом экране → rc=0" "$rc" "0"
+}
+
+# --- Guard достижим и fail-closed из меню (доставка через меню, вход-пайп) ------
+test_menu_deliver_guard_fail_closed() {
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"
+  local dist="$base/_dist"; mkdir -p "$dist"
+  git init -q --bare "$remote"; git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt \
+    && git add -A && git commit -q -m init && git push -q -u origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo keep > "$src/file.txt"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
+  local out rc=0
+  # 2=deliver → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
+  out="$( ( printf '2\n1\nfeature/T-77\nmsg\n' | {
+      source "$PBX"
+      WORKSPACE="$base/ws-empty"; mkdir -p "$WORKSPACE"
+      DIST_DIR="$dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || rc=$?
+  assert_has "меню→deliver: guard прервал доставку" "$out" "Доставка прервана"
+  assert_eq  "меню→deliver: ветка НЕ запушена" "$(git -C "$remote" branch --list feature/T-77)" ""
+  cd "$HERE"
+  rm -rf "$base" "$reg"
+}
+
+test_ui_raw_off_idempotent() {
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; ui_raw_off; ui_raw_off; echo REACHED' 2>/dev/null)"
+  assert_eq "ui_raw_off дважды не падает под set -e" "$out" "REACHED"
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -411,6 +609,33 @@ test_deliver_guard_blocks_deletions() {
 
   cd "$HERE"
   rm -rf "$base" "$reg"
+}
+
+# --- Guard plain-инвариант: тексты неизменны без ANSI -------------------------
+test_deliver_guard_plain_invariant() {
+  # тексты guard в plain неизменны и без ANSI (протокол агентов)
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES
+  git init -q --bare "$remote"; git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt \
+    && git add -A && git commit -q -m init && git push -q -u origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo keep > "$src/file.txt"   # снимок без roles.txt → удаление
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$src" "$repo" > "$reg/proj.conf"
+
+  local out
+  out="$( ( cmd_deliver "proj" "feature/T-8" "msg" "$dist/proj.tar.gz" </dev/null 2>&1 ) )" || true
+  assert_has "guard plain: строка 📋"            "$out" "📋 Будет закоммичено в 'feature/T-8' → MR в 'dev' (git diff --cached --stat):"
+  assert_has "guard plain: заголовок удалений"   "$out" "⚠️  БУДУТ УДАЛЕНЫ файлы из 'dev'"
+  assert_has "guard plain: имя удаляемого файла" "$out" "- roles.txt"
+  assert_no  "guard plain: без ANSI"             "$out" $'\033'
+  cd "$HERE"; rm -rf "$base" "$reg"
 }
 
 # --- log: диагностика для ИИ-агента -----------------------------------------
@@ -636,6 +861,13 @@ test_scan_no_descend_into_repo() {
 }
 
 test_source_no_run
+test_color_gated_in_pipe
+test_ui_flags_nontty
+test_glyphs_ascii_fallback
+test_c_funcs_respect_flags
+test_ui_helpers_plain_silent
+test_ui_section_plain_invariant
+test_pack_plain_invariant
 test_repo_remote_url
 test_scan_whole_repo
 test_scan_container_one
@@ -670,6 +902,21 @@ test_registry_crlf
 test_registry_crlf_inproject_layer
 test_list_projects
 test_list_union
+test_list_pipe_bare_names
+test_help_plain_invariant
+test_menu_select_plain_choice
+test_menu_select_plain_cancel
+test_menu_select_plain_eof
+test_menu_select_plain_invalid_then_valid
+test_menu_select_plain_leading_zero
+test_menu_select_falls_back_to_plain
+test_menu_gate_nontty_help
+test_menu_gate_no_menu_env
+test_menu_exit_item
+test_menu_pack_e2e
+test_menu_cancel_returns_cleanly
+test_menu_deliver_guard_fail_closed
+test_ui_raw_off_idempotent
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
@@ -678,6 +925,7 @@ test_pack_e2e
 test_pack_e2e_registry
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
+test_deliver_guard_plain_invariant
 test_log_reports_project
 test_log_no_project
 test_log_survives_unwritable_dist
