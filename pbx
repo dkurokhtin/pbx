@@ -239,6 +239,34 @@ sync_exclude_args() {
   return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
 }
 
+# ---- meta: манифест последней упаковки ---------------------------------------
+# DIST_DIR/<проект>.meta, bash-формат KEY=value (jq нет). Пишется атомарно
+# (.tmp → mv), best-effort: сбой записи меты НЕ роняет pack — архив важнее.
+# Читатели: pbx status (дрейф по коммитам), pbx log, этапы Э2/Э3.
+write_pack_meta() {
+  local project="$1" src="$2" out_meta="$3"
+  local commit='-' branch='-' dirty='-'
+  local st_out=''
+  if [[ -e "$src/.git" ]]; then
+    commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo '-')"
+    branch="$(git -C "$src" branch --show-current 2>/dev/null || true)"
+    [[ -n "$branch" ]] || branch='-'
+    if st_out="$(git -C "$src" status --porcelain 2>/dev/null)"; then
+      dirty="$(printf '%s' "$st_out" | grep -c . || true)"
+    fi
+  fi
+  {
+    printf '# pbx meta: проект %s, автогенерация pack\n' "$project"
+    printf 'PBX_META_VERSION=1\n'
+    printf 'PACKED_AT=%s\n' "$(date +%s)"
+    printf 'COMMIT=%s\n' "$commit"
+    printf 'BRANCH=%s\n' "$branch"
+    printf 'DIRTY_AT_PACK=%s\n' "$dirty"
+  } > "$out_meta.tmp" 2>/dev/null && mv "$out_meta.tmp" "$out_meta" 2>/dev/null \
+    || c_warn "⚠️  Не удалось записать мету: $out_meta"
+  return 0
+}
+
 # ---- pack ------------------------------------------------------------------
 # Упаковать исходники проекта в _dist/<проект>.tar.gz.
 # Исключаем всё, что не должно попасть в репозиторий: .git, .venv, node_modules,
@@ -258,8 +286,219 @@ cmd_pack() {
   local excludes; mapfile -t excludes < <(pack_exclude_args)
   tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
+  local meta="$DIST_DIR/$project.meta"
+  write_pack_meta "$project" "$SRC" "$meta"
+
   ui_dim "размер: $(du -h "$out" | awk '{print $1}')"
+  if [[ -f "$meta" ]]; then
+    local mcommit mbranch
+    mcommit="$(sed -n 's/^COMMIT=//p' "$meta")"
+    mbranch="$(sed -n 's/^BRANCH=//p' "$meta")"
+    if [[ "$mcommit" != '-' && -n "$mcommit" ]]; then
+      ui_dim "meta: ${mcommit:0:7} @ $mbranch"
+    fi
+  fi
   c_green "✅ Архив готов: $out"
+}
+
+# ---- status: сбор данных одного проекта ---------------------------------------
+# Заполняет ST_*-глобали. Вызывать ПОСЛЕ load_config (берёт SRC/REPO/DIST_DIR).
+# Сентинели: строка '' (неизвестно), число -1; булевы — строки true/false.
+# ST_STALE=true ⇔ нужен новый pack: нет архива при живом SRC; (exact) есть
+# неупакованные коммиты или dirty; (heuristic) архив старее коммита или dirty.
+status_collect() {
+  local project="$1"
+  ST_NAME="$project"
+  ST_SRC="$SRC"; ST_SRC_EXISTS=false; ST_GIT=false
+  ST_BRANCH=''; ST_DIRTY=-1; ST_UPSTREAM=''; ST_AHEAD=-1; ST_BEHIND=-1
+  ST_ARCHIVE="$DIST_DIR/$project.tar.gz"; ST_ARCHIVE_EXISTS=false
+  ST_ARCHIVE_MTIME=-1; ST_ARCHIVE_SIZE=''
+  ST_META_COMMIT=''; ST_META_BRANCH=''; ST_META_PACKED_AT=-1; ST_META_DIRTY=-1
+  ST_DRIFT='none'; ST_UNPACKED=-1; ST_DIRTY_NOW=-1; ST_STALE=false
+  ST_REPO="$REPO"; ST_REPO_EXISTS=false
+
+  [[ -d "$ST_SRC" ]] && ST_SRC_EXISTS=true
+  [[ -d "$ST_REPO" ]] && ST_REPO_EXISTS=true
+
+  if [[ "$ST_SRC_EXISTS" == true && -e "$ST_SRC/.git" ]]; then
+    ST_GIT=true
+    ST_BRANCH="$(git -C "$ST_SRC" branch --show-current 2>/dev/null || true)"
+    [[ -n "$ST_BRANCH" ]] || ST_BRANCH='HEAD'
+    # dirty без пайпа под pipefail: сбой git (битый .git) НЕ роняет сбор —
+    # присваивание в условии if не триггерит set -e; grep -c сам печатает 0
+    local st_out=''
+    if st_out="$(git -C "$ST_SRC" status --porcelain 2>/dev/null)"; then
+      ST_DIRTY="$(printf '%s' "$st_out" | grep -c . || true)"
+    fi
+    ST_DIRTY_NOW="$ST_DIRTY"
+    ST_UPSTREAM="$(git -C "$ST_SRC" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)"
+    if [[ -n "$ST_UPSTREAM" ]]; then
+      local lr
+      lr="$(git -C "$ST_SRC" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || true)"
+      if [[ -n "$lr" ]]; then
+        ST_BEHIND="${lr%%$'\t'*}"
+        ST_AHEAD="${lr##*$'\t'}"
+      fi
+    fi
+  fi
+
+  if [[ -f "$ST_ARCHIVE" ]]; then
+    ST_ARCHIVE_EXISTS=true
+    ST_ARCHIVE_MTIME="$(date -r "$ST_ARCHIVE" +%s 2>/dev/null || echo -1)"
+    ST_ARCHIVE_SIZE="$(du -h "$ST_ARCHIVE" 2>/dev/null | awk '{print $1}')"
+  fi
+
+  local meta="$DIST_DIR/$project.meta"
+  if [[ -f "$meta" ]]; then
+    ST_META_COMMIT="$(sed -n 's/^COMMIT=//p' "$meta")"
+    ST_META_BRANCH="$(sed -n 's/^BRANCH=//p' "$meta")"
+    ST_META_PACKED_AT="$(sed -n 's/^PACKED_AT=//p' "$meta")"
+    ST_META_DIRTY="$(sed -n 's/^DIRTY_AT_PACK=//p' "$meta")"
+    [[ "$ST_META_COMMIT" == '-' ]] && ST_META_COMMIT=''
+    [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
+    [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
+    [[ -n "$ST_META_PACKED_AT" ]] || ST_META_PACKED_AT=-1
+  fi
+
+  # дрейф от последнего pack
+  if [[ "$ST_GIT" == true && "$ST_ARCHIVE_EXISTS" == true ]]; then
+    if [[ -n "$ST_META_COMMIT" ]] \
+       && git -C "$ST_SRC" cat-file -e "$ST_META_COMMIT^{commit}" 2>/dev/null; then
+      ST_DRIFT='exact'
+      ST_UNPACKED="$(git -C "$ST_SRC" rev-list --count "$ST_META_COMMIT..HEAD" 2>/dev/null || echo -1)"
+      if [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] || [[ "$ST_DIRTY_NOW" -gt 0 ]]; then
+        ST_STALE=true
+      fi
+    else
+      ST_DRIFT='heuristic'
+      local last_ct
+      last_ct="$(git -C "$ST_SRC" log -1 --format=%ct 2>/dev/null || echo -1)"
+      if [[ "$last_ct" != -1 && "$ST_ARCHIVE_MTIME" != -1 && "$last_ct" -gt "$ST_ARCHIVE_MTIME" ]]; then
+        ST_STALE=true
+      fi
+      [[ "$ST_DIRTY_NOW" -gt 0 ]] && ST_STALE=true
+    fi
+  fi
+  if [[ "$ST_SRC_EXISTS" == true && "$ST_ARCHIVE_EXISTS" == false ]]; then
+    ST_STALE=true
+  fi
+  return 0
+}
+
+# экранирование строки для ручной JSON-сборки (jq в системе нет)
+_json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# Выравнивание по СИМВОЛАМ, не байтам: printf %-Ns считает байты — кириллица/…/— ломают колонки
+# (local в два шага: n=${#t} в одной строке с local t=… падает под set -u — expansion раньше присваивания)
+pad()  { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%s%*s' "$t" $((w - n)) ''; fi; }
+padr() { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%*s%s' $((w - n)) '' "$t"; fi; }
+
+# человекочитаемая метка дрейфа по ST_* текущего проекта
+status_drift_label() {
+  if [[ "$ST_SRC_EXISTS" == false ]]; then printf 'нет SRC'; return 0; fi
+  if [[ "$ST_ARCHIVE_EXISTS" == false ]]; then printf 'нет архива'; return 0; fi
+  case "$ST_DRIFT" in
+    exact)
+      local s=''
+      [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] && s="+${ST_UNPACKED} коммит."
+      if [[ "$ST_DIRTY_NOW" != -1 && "$ST_DIRTY_NOW" -gt 0 ]]; then
+        s="${s:+$s, }${ST_DIRTY_NOW} файл. правок"
+      fi
+      if [[ -n "$s" ]]; then printf '%s' "$s"; else printf '%s упаковано' "$G_OK"; fi
+      ;;
+    heuristic)
+      if [[ "$ST_STALE" == true ]]; then printf '~протух'; else printf '~ок'; fi
+      ;;
+    none)
+      printf 'не git — неизвестен'
+      ;;
+  esac
+  return 0
+}
+
+# JSON-массив статусов (схема — спека §4; порядок ключей фиксирован)
+status_json() {
+  local p first=1
+  printf '['
+  for p in "$@"; do
+    load_config "$p"
+    status_collect "$p"
+    if (( first )); then first=0; else printf ','; fi
+    printf '\n  {"name":"%s","src":"%s","src_exists":%s,"git":%s,' \
+      "$(_json_str "$ST_NAME")" "$(_json_str "$ST_SRC")" "$ST_SRC_EXISTS" "$ST_GIT"
+    printf '"branch":"%s","dirty":%s,"upstream":"%s","ahead":%s,"behind":%s,' \
+      "$(_json_str "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str "$ST_UPSTREAM")" "$ST_AHEAD" "$ST_BEHIND"
+    printf '"archive":"%s","archive_exists":%s,"archive_mtime":%s,"archive_size":"%s",' \
+      "$(_json_str "$ST_ARCHIVE")" "$ST_ARCHIVE_EXISTS" "$ST_ARCHIVE_MTIME" "$(_json_str "$ST_ARCHIVE_SIZE")"
+    printf '"meta_commit":"%s","meta_branch":"%s","meta_packed_at":%s,"meta_dirty":%s,' \
+      "$(_json_str "$ST_META_COMMIT")" "$(_json_str "$ST_META_BRANCH")" "$ST_META_PACKED_AT" "$ST_META_DIRTY"
+    printf '"drift":"%s","unpacked_commits":%s,"dirty_now":%s,"stale":%s,' \
+      "$ST_DRIFT" "$ST_UNPACKED" "$ST_DIRTY_NOW" "$ST_STALE"
+    printf '"repo":"%s","repo_exists":%s}' "$(_json_str "$ST_REPO")" "$ST_REPO_EXISTS"
+  done
+  printf '\n]\n'
+  return 0
+}
+
+cmd_status() {
+  local project='' json=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "Неизвестный флаг: $a (ожидается --json)" ;;
+      *) [[ -n "$project" ]] && die "Лишний аргумент: $a (проект указывается один)"; project="$a" ;;
+    esac
+  done
+  [[ -n "$project" ]] && valid_project "$project"
+
+  local -a names=()
+  if [[ -n "$project" ]]; then names=("$project"); else mapfile -t names < <(list_projects); fi
+
+  if (( json )); then
+    status_json ${names[@]+"${names[@]}"}
+    return 0
+  fi
+
+  ui_section "Статус проектов" "🔵 Статус проектов:"
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов не найдено)"
+    return 0
+  fi
+  local p drift b color reset
+  for p in "${names[@]}"; do
+    load_config "$p"
+    status_collect "$p"
+    drift="$(status_drift_label)"
+    b="$ST_BRANCH"; [[ -z "$b" ]] && b='—'
+    if (( ${#b} > 24 )); then b="${b:0:23}…"; fi
+    local dirty_disp="$ST_DIRTY"; [[ "$dirty_disp" == -1 ]] && dirty_disp='—'
+    local arch_disp='—'
+    if [[ "$ST_ARCHIVE_EXISTS" == true ]]; then
+      if [[ "$ST_ARCHIVE_MTIME" != -1 ]]; then
+        arch_disp="$ST_ARCHIVE_SIZE $(date -d "@$ST_ARCHIVE_MTIME" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+      else
+        arch_disp="$ST_ARCHIVE_SIZE ?"
+      fi
+    fi
+    color=''; reset=''
+    if (( UI_COLOR_OUT )); then
+      reset="$C_RESET"
+      if [[ "$ST_STALE" == true ]]; then color="$C_YELLOW"
+      elif [[ "$drift" == "$G_OK "* ]]; then color="$C_GREEN"
+      else color="$C_DIM"; fi
+    fi
+    printf '  %s %s %s  %s %s%s%s\n' \
+      "$(pad "$p" 14)" "$(pad "$b" 24)" "$(padr "$dirty_disp" 5)" "$(pad "$arch_disp" 14)" \
+      "$color" "$drift" "$reset"
+    if [[ "$ST_REPO_EXISTS" == true && -e "$ST_REPO/.git" ]]; then
+      local rb rstate
+      rb="$(git -C "$ST_REPO" branch --show-current 2>/dev/null || echo '?')"
+      if [[ -n "$(git -C "$ST_REPO" status --porcelain 2>/dev/null)" ]]; then rstate='dirty'; else rstate='clean'; fi
+      ui_dim "repo: $ST_REPO — $rb ($rstate)"
+    fi
+  done
+  return 0
 }
 
 # Пуш ветки + создание MR/PR согласно FORGE.
@@ -449,6 +688,13 @@ collect_diag() {
         printf '[repo]    branch=%s remote=%s\n' \
           "$(git -C "$REPO" branch --show-current 2>/dev/null || echo '—')" \
           "$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '—')"
+        local up ab ahead='—' behind='—'
+        up="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '—')"
+        if [[ "$up" != '—' ]]; then
+          ab="$(git -C "$REPO" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || true)"
+          if [[ -n "$ab" ]]; then behind="${ab%%$'\t'*}"; ahead="${ab##*$'\t'}"; fi
+        fi
+        printf '[repo]    upstream=%s ahead=%s behind=%s\n' "$up" "$ahead" "$behind"
         local st; st="$(git -C "$REPO" status -s 2>/dev/null | head -30)"
         printf '[repo]    status:\n'
         if [[ -n "$st" ]]; then printf '%s\n' "$st" | sed 's/^/          /'; else printf '          (clean)\n'; fi
@@ -463,6 +709,13 @@ collect_diag() {
           "$(du -h "$arch" 2>/dev/null | awk '{print $1}')" \
           "$(date -r "$arch" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')" \
           "$(tar -tzf "$arch" 2>/dev/null | wc -l | tr -d ' ')"
+        local metaf="$DIST_DIR/$project.meta"
+        if [[ -f "$metaf" ]]; then
+          printf '[archive] meta: commit=%s branch=%s packed_at=%s\n' \
+            "$(sed -n 's/^COMMIT=//p' "$metaf")" \
+            "$(sed -n 's/^BRANCH=//p' "$metaf")" \
+            "$(date -d "@$(sed -n 's/^PACKED_AT=//p' "$metaf")" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
+        fi
       else
         printf '[archive] нет архива: %s\n' "$arch"
       fi
@@ -516,7 +769,7 @@ EOF
 # ---- scan ------------------------------------------------------------------
 # Найти репозитории в каталоге и создать записи реестра (REPO или SRC).
 cmd_scan() {
-  local field="" dir="" dry=0 a dirset=0
+  local field="" dir="" dry=0 a dirset=0 br
   for a in "$@"; do
     a="$(strip_cr "$a")"
     case "$a" in
@@ -549,10 +802,22 @@ cmd_scan() {
     forge=""
     [[ "$url" == *"@github.com:"* || "$url" == *"//github.com/"* ]] && forge=$'\nFORGE=github'
     if [[ "$dry" -eq 1 ]]; then
-      c_green "  + $name → $field=$path (dry-run)"
+      if (( UI_COLOR_OUT )); then
+        br="$(git -C "$path" branch --show-current 2>/dev/null || true)"
+        printf '\033[32m  + %s → %s=%s (dry-run)\033[0m%s\n' "$name" "$field" "$path" \
+          "${br:+ ${C_DIM}[$br]${C_RESET}}"
+      else
+        c_green "  + $name → $field=$path (dry-run)"
+      fi
     else
       printf '# Реестр pbx (scan): проект %s\n%s=%s%s\n' "$name" "$field" "$path" "$forge" > "$f"
-      c_green "  + $name → $field=$path"
+      if (( UI_COLOR_OUT )); then
+        br="$(git -C "$path" branch --show-current 2>/dev/null || true)"
+        printf '\033[32m  + %s → %s=%s\033[0m%s\n' "$name" "$field" "$path" \
+          "${br:+ ${C_DIM}[$br]${C_RESET}}"
+      else
+        c_green "  + $name → $field=$path"
+      fi
     fi
     created=$((created+1))
   done < <(scan_candidates "$dir")
@@ -573,6 +838,7 @@ pbx — доставка проектов Pybotx (WSL)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
   pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
                                                 (config/repo/archive/env; pbx также сам пишет её в этот файл при любой ошибке)
+  pbx status  [проект] [--json]                 сводка: ветка, dirty, дрейф от последнего pack, свежесть архива
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
@@ -616,6 +882,7 @@ ${C_BOLD}Команды${C_RESET}
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
   ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
+  ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
   ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
   ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
   ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
@@ -869,6 +1136,7 @@ cmd_menu() {
     'pack    — упаковать проект в архив'
     'deliver — доставить архив в репо (ветка + MR)'
     'log     — диагностика проекта'
+    'status  — сводка по проектам'
     'list    — список проектов'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
@@ -881,11 +1149,12 @@ cmd_menu() {
       0) if menu_project_flow pack;    then return 0; fi ;;
       1) if menu_project_flow deliver; then return 0; fi ;;
       2) menu_project_flow log || true ;;
-      3) cmd_list; menu_pause ;;
-      4) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      5) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      6) cmd_help; menu_pause ;;
-      7) return 0 ;;
+      3) cmd_status; menu_pause ;;
+      4) cmd_list; menu_pause ;;
+      5) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      6) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      7) cmd_help; menu_pause ;;
+      8) return 0 ;;
     esac
   done
 }
@@ -908,6 +1177,7 @@ main() {
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
     log)                cmd_log "$@" ;;
+    status|st)          cmd_status "$@" ;;
     list|ls)            cmd_list ;;
     help|-h|--help)     cmd_help ;;
     *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;

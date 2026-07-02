@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (8) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (9) завершает без действий
   local rc=0
-  ( printf '8\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» → rc=0" "$rc" "0"
+  ( printf '9\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (9) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -427,6 +427,24 @@ test_menu_cancel_returns_cleanly() {
   local rc=0
   ( printf 'q\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
   assert_eq "меню: отмена на первом экране → rc=0" "$rc" "0"
+}
+
+test_menu_status_returns_to_menu() {
+  local ws; ws="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  mkdir -p "$ws/proj"
+  # 4 = status → вывод → Enter (menu_pause) → 9 = выход
+  local out
+  out="$( ( printf '4\n\n9\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || true
+  assert_has "меню: status вызван" "$out" "Статус проектов"
+  # заголовок меню дважды: до status и после возврата (доказательство возврата)
+  assert_eq "меню: после status снова меню" \
+    "$(printf '%s' "$out" | grep -c 'что делаем')" "2"
+  rm -rf "$ws" "$reg"
 }
 
 # --- Guard достижим и fail-closed из меню (доставка через меню, вход-пайп) ------
@@ -534,6 +552,236 @@ test_pack_e2e_registry() {
   assert_no  "e2e-reg: нет вложенного node_modules"  "$list" "node_modules"
   assert_no  "e2e-reg: нет .git"                     "$list" "sup/.git"
   rm -rf "$base" "$reg"
+}
+
+# --- pack: манифест .meta ------------------------------------------------------
+test_pack_writes_meta_git() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  ( cd "$ws/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git add -A && git commit -qm init && echo dirty >> src/a.txt ) >/dev/null 2>&1
+  cmd_pack proj >/dev/null 2>&1
+  local meta="$ws/_dist/proj.meta" m
+  if [[ -f "$meta" ]]; then ok "meta: файл создан"; else bad "meta: файл не создан"; fi
+  m="$(cat "$meta" 2>/dev/null)"
+  assert_has "meta: версия"     "$m" "PBX_META_VERSION=1"
+  assert_has "meta: COMMIT"     "$m" "COMMIT=$(git -C "$ws/proj" rev-parse HEAD)"
+  assert_has "meta: BRANCH"     "$m" "BRANCH=$(git -C "$ws/proj" branch --show-current)"
+  assert_has "meta: DIRTY=1"    "$m" "DIRTY_AT_PACK=1"
+  assert_has "meta: PACKED_AT"  "$m" "PACKED_AT="
+  rm -rf "$ws" "$reg"
+}
+
+test_pack_writes_meta_nongit() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  cmd_pack proj >/dev/null 2>&1
+  local m; m="$(cat "$ws/_dist/proj.meta" 2>/dev/null)"
+  assert_has "meta(не-git): COMMIT=-" "$m" "COMMIT=-"
+  assert_has "meta(не-git): BRANCH=-" "$m" "BRANCH=-"
+  assert_has "meta(не-git): DIRTY=-"  "$m" "DIRTY_AT_PACK=-"
+  rm -rf "$ws" "$reg"
+}
+
+test_pack_meta_broken_git_best_effort() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  : > "$ws/proj/.git"          # битый .git: пустой файл вместо каталога
+  local rc=0
+  ( cmd_pack proj >/dev/null 2>&1 ) || rc=$?
+  assert_eq  "битый .git: pack не падает (best-effort)" "$rc" "0"
+  assert_has "битый .git: архив создан" "$(ls "$ws/_dist" 2>/dev/null)" "proj.tar.gz"
+  assert_has "битый .git: DIRTY=-"      "$(cat "$ws/_dist/proj.meta" 2>/dev/null)" "DIRTY_AT_PACK=-"
+  rm -rf "$ws" "$reg"
+}
+
+# --- status_collect: дрейф ------------------------------------------------------
+# Общая фикстура: git-проект в WORKSPACE + pack. Возвращает пути через глобали
+# SC_WS/SC_REG (вызывающий обязан rm -rf и unset).
+_mk_status_fixture() {
+  SC_WS="$(make_ws)"; WORKSPACE="$SC_WS"; DIST_DIR="$SC_WS/_dist"
+  SC_REG="$(make_ws)"; PBX_REGISTRY_DIR="$SC_REG"
+  mkdir -p "$SC_WS/proj/src"; echo hi > "$SC_WS/proj/src/a.txt"
+  ( cd "$SC_WS/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git add -A && git commit -qm init ) >/dev/null 2>&1
+}
+
+test_status_collect_exact_clean() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "exact-clean: drift"    "$ST_DRIFT"    "exact"
+  assert_eq "exact-clean: unpacked" "$ST_UNPACKED" "0"
+  assert_eq "exact-clean: dirty"    "$ST_DIRTY_NOW" "0"
+  assert_eq "exact-clean: stale"    "$ST_STALE"    "false"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_exact_drift() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  ( cd "$SC_WS/proj" && echo more >> src/a.txt && git commit -qam second \
+    && echo uncommitted >> src/a.txt ) >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "exact-drift: drift"     "$ST_DRIFT"     "exact"
+  assert_eq "exact-drift: +1 коммит" "$ST_UNPACKED"  "1"
+  assert_eq "exact-drift: dirty=1"   "$ST_DIRTY_NOW" "1"
+  assert_eq "exact-drift: stale"     "$ST_STALE"     "true"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_heuristic() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  rm -f "$SC_WS/_dist/proj.meta"                       # меты нет → эвристика
+  touch -d '2000-01-01' "$SC_WS/_dist/proj.tar.gz"     # архив «старый»
+  load_config proj; status_collect proj
+  assert_eq "heuristic: drift" "$ST_DRIFT" "heuristic"
+  assert_eq "heuristic: stale (архив старее коммита)" "$ST_STALE" "true"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_nongit_and_noarchive() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"; echo x > "$ws/plainproj/f.txt"
+  load_config plainproj; status_collect plainproj
+  assert_eq "не-git: git=false"      "$ST_GIT"    "false"
+  assert_eq "не-git: branch пуст"    "$ST_BRANCH" ""
+  assert_eq "не-git: dirty=-1"       "$ST_DIRTY"  "-1"
+  assert_eq "нет архива: stale=true" "$ST_STALE"  "true"
+  assert_eq "нет архива: drift=none" "$ST_DRIFT"  "none"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_collect_orphan_repo() {
+  # живой кейс suba: git init без единого коммита
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/orph"; ( cd "$ws/orph" && git init -q . && echo x > f.txt && git add f.txt ) >/dev/null 2>&1
+  load_config orph
+  local rc=0
+  status_collect orph || rc=$?
+  assert_eq "orphan: не падает"   "$rc"      "0"
+  assert_eq "orphan: git=true"    "$ST_GIT"  "true"
+  assert_eq "orphan: ahead=-1"    "$ST_AHEAD" "-1"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_collect_upstream_ahead() {
+  local base; base="$(make_ws)"; WORKSPACE="$base"; DIST_DIR="$base/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  git init -q --bare "$base/remote.git"
+  mkdir -p "$base/proj"
+  ( cd "$base/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git remote add origin "$base/remote.git" \
+    && echo a > f.txt && git add -A && git commit -qm one && git push -qu origin HEAD \
+    && echo b >> f.txt && git commit -qam two ) >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "upstream: ahead=1"  "$ST_AHEAD"  "1"
+  assert_eq "upstream: behind=0" "$ST_BEHIND" "0"
+  assert_has "upstream: имя"     "$ST_UPSTREAM" "origin/"
+  rm -rf "$base" "$reg"
+}
+
+# --- Task 3: cmd_status — таблица + --json + диспетчер + help -----------------
+test_status_json_valid_and_pure() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  local out; out="$(cmd_status --json 2>/dev/null)"
+  assert_has "json: начинается с [" "${out:0:1}" "["
+  assert_has "json: имя проекта"    "$out" '"name":"proj"'
+  assert_has "json: drift exact"    "$out" '"drift":"exact"'
+  assert_has "json: git true"       "$out" '"git":true'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "json: валиден (python3 json.load)"
+    else
+      bad "json: НЕ валиден (python3 json.load)"
+    fi
+  fi
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_json_sentinels_nongit() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"
+  local out; out="$(cmd_status plainproj --json 2>/dev/null)"
+  assert_has "json-сентинели: git false"  "$out" '"git":false'
+  assert_has "json-сентинели: branch \"\"" "$out" '"branch":""'
+  assert_has "json-сентинели: dirty -1"   "$out" '"dirty":-1'
+  assert_has "json-сентинели: drift none" "$out" '"drift":"none"'
+  rm -rf "$ws" "$reg"
+}
+
+test_status_table_pipe_no_ansi() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/alpha"
+  local out; out="$(PBX_WORKSPACE="$ws" PBX_REGISTRY_DIR="$reg" bash "$PBX" status 2>&1)"
+  assert_no  "status в пайпе: без ANSI" "$out" $'\033'
+  assert_has "status в пайпе: заголовок" "$out" "Статус проектов"
+  assert_has "status в пайпе: строка проекта" "$out" "alpha"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_unknown_project_dies() {
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local rc=0
+  ( cmd_status "no-such-proj-$$" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "status: неизвестный проект → ошибка" "$rc" "1"
+  rm -rf "$reg" "$ws"
+}
+
+test_pad_helpers_multibyte() {
+  local out
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; pad "абв…" 8; printf "|"')"
+  assert_eq "pad: многобайтовое по символам" "$out" "абв…    |"
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; pad "longer-than-width" 5; printf "|"')"
+  assert_eq "pad: длиннее ширины — не режет" "$out" "longer-than-width|"
+  out="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; padr "5" 3; printf "|"')"
+  assert_eq "padr: правое выравнивание" "$out" "  5|"
+}
+
+# --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
+test_scan_plain_no_branch_tail() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  local out; out="$(cmd_scan --repo "$ws" 2>&1)"
+  assert_has "scan plain: строка кандидата прежняя" "$out" "+ proj → REPO=$ws/proj"
+  assert_no  "scan plain: без хвоста ветки"          "$out" "["
+  rm -rf "$ws" "$reg"
+}
+
+test_log_upstream_and_meta_lines() {
+  local base; base="$(make_ws)"
+  local repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  git init -q --bare "$base/remote.git"
+  git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$base/remote.git" \
+    && git checkout -q -b dev && echo x > a.txt && git add -A && git commit -qm init \
+    && git push -qu origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo y > "$src/a.txt"
+  # мета: как пишет pack
+  printf 'PBX_META_VERSION=1\nPACKED_AT=1700000000\nCOMMIT=abc1234\nBRANCH=dev\nDIRTY_AT_PACK=0\n' \
+    > "$dist/proj.meta"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
+
+  local out; out="$(cmd_log proj 2>&1)"
+  assert_has "log: строка upstream"      "$out" "upstream=origin/dev"
+  assert_has "log: ahead/behind"         "$out" "ahead=0 behind=0"
+  assert_has "log: meta-строка"          "$out" "meta: commit=abc1234 branch=dev"
+  assert_has "log: старые строки целы"   "$out" "[config]"
+  cd "$HERE"; rm -rf "$base" "$reg"
 }
 
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
@@ -915,6 +1163,7 @@ test_menu_gate_no_menu_env
 test_menu_exit_item
 test_menu_pack_e2e
 test_menu_cancel_returns_cleanly
+test_menu_status_returns_to_menu
 test_menu_deliver_guard_fail_closed
 test_ui_raw_off_idempotent
 test_pack_excludes
@@ -923,6 +1172,22 @@ test_sync_excludes
 test_exclude_builders_errexit_safe
 test_pack_e2e
 test_pack_e2e_registry
+test_pack_writes_meta_git
+test_pack_writes_meta_nongit
+test_pack_meta_broken_git_best_effort
+test_status_collect_exact_clean
+test_status_collect_exact_drift
+test_status_collect_heuristic
+test_status_collect_nongit_and_noarchive
+test_status_collect_orphan_repo
+test_status_collect_upstream_ahead
+test_status_json_valid_and_pure
+test_status_json_sentinels_nongit
+test_status_table_pipe_no_ansi
+test_status_unknown_project_dies
+test_pad_helpers_multibyte
+test_scan_plain_no_branch_tail
+test_log_upstream_and_meta_lines
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant

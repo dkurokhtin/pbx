@@ -298,7 +298,12 @@ status_collect() {
     ST_GIT=true
     ST_BRANCH="$(git -C "$ST_SRC" branch --show-current 2>/dev/null || true)"
     [[ -n "$ST_BRANCH" ]] || ST_BRANCH='HEAD'
-    ST_DIRTY="$(git -C "$ST_SRC" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    # dirty без пайпа под pipefail: сбой git (битый .git) НЕ роняет сбор —
+    # присваивание в условии if не триггерит set -e; grep -c сам печатает 0
+    local st_out=''
+    if st_out="$(git -C "$ST_SRC" status --porcelain 2>/dev/null)"; then
+      ST_DIRTY="$(printf '%s' "$st_out" | grep -c . || true)"
+    fi
     ST_DIRTY_NOW="$ST_DIRTY"
     ST_UPSTREAM="$(git -C "$ST_SRC" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)"
     if [[ -n "$ST_UPSTREAM" ]]; then
