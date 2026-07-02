@@ -246,11 +246,14 @@ sync_exclude_args() {
 write_pack_meta() {
   local project="$1" src="$2" out_meta="$3"
   local commit='-' branch='-' dirty='-'
+  local st_out=''
   if [[ -e "$src/.git" ]]; then
     commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo '-')"
     branch="$(git -C "$src" branch --show-current 2>/dev/null || true)"
     [[ -n "$branch" ]] || branch='-'
-    dirty="$(git -C "$src" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    if st_out="$(git -C "$src" status --porcelain 2>/dev/null)"; then
+      dirty="$(printf '%s' "$st_out" | grep -c . || true)"
+    fi
   fi
   {
     printf '# pbx meta: проект %s, автогенерация pack\n' "$project"

@@ -567,6 +567,19 @@ test_pack_writes_meta_nongit() {
   rm -rf "$ws" "$reg"
 }
 
+test_pack_meta_broken_git_best_effort() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  : > "$ws/proj/.git"          # битый .git: пустой файл вместо каталога
+  local rc=0
+  ( cmd_pack proj >/dev/null 2>&1 ) || rc=$?
+  assert_eq  "битый .git: pack не падает (best-effort)" "$rc" "0"
+  assert_has "битый .git: архив создан" "$(ls "$ws/_dist" 2>/dev/null)" "proj.tar.gz"
+  assert_has "битый .git: DIRTY=-"      "$(cat "$ws/_dist/proj.meta" 2>/dev/null)" "DIRTY_AT_PACK=-"
+  rm -rf "$ws" "$reg"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -956,6 +969,7 @@ test_pack_e2e
 test_pack_e2e_registry
 test_pack_writes_meta_git
 test_pack_writes_meta_nongit
+test_pack_meta_broken_git_best_effort
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
