@@ -374,6 +374,14 @@ test_menu_select_plain_invalid_then_valid() {
   out="$(printf 'x\n9\n1\n' | { source "$PBX"; menu_select_plain "t" a b; } 2>/dev/null)"
   assert_eq "plain-меню: мусор/вне диапазона переспрашивается" "$out" "0"
 }
+test_menu_select_plain_leading_zero() {
+  local out err rc=0
+  err="$(mktemp)"
+  out="$(printf '08\n1\n' | { source "$PBX"; menu_select_plain "t" a b; } 2>"$err")" || rc=$?
+  assert_eq "plain-меню: «08» переспрашивается, затем 1 → 0" "$out" "0"
+  assert_no "plain-меню: нет octal-ошибки в stderr" "$(cat "$err")" "value too great for base"
+  rm -f "$err"
+}
 
 # --- Task 7: raw-обвязка + menu_select со стрелками -----------------------
 test_menu_select_falls_back_to_plain() {
@@ -419,6 +427,34 @@ test_menu_cancel_returns_cleanly() {
   local rc=0
   ( printf 'q\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
   assert_eq "меню: отмена на первом экране → rc=0" "$rc" "0"
+}
+
+# --- Guard достижим и fail-closed из меню (доставка через меню, вход-пайп) ------
+test_menu_deliver_guard_fail_closed() {
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"
+  local dist="$base/_dist"; mkdir -p "$dist"
+  git init -q --bare "$remote"; git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt \
+    && git add -A && git commit -q -m init && git push -q -u origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo keep > "$src/file.txt"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
+  local out rc=0
+  # 2=deliver → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
+  out="$( ( printf '2\n1\nfeature/T-77\nmsg\n' | {
+      source "$PBX"
+      WORKSPACE="$base/ws-empty"; mkdir -p "$WORKSPACE"
+      DIST_DIR="$dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || rc=$?
+  assert_has "меню→deliver: guard прервал доставку" "$out" "Доставка прервана"
+  assert_eq  "меню→deliver: ветка НЕ запушена" "$(git -C "$remote" branch --list feature/T-77)" ""
+  cd "$HERE"
+  rm -rf "$base" "$reg"
 }
 
 test_ui_raw_off_idempotent() {
@@ -872,12 +908,14 @@ test_menu_select_plain_choice
 test_menu_select_plain_cancel
 test_menu_select_plain_eof
 test_menu_select_plain_invalid_then_valid
+test_menu_select_plain_leading_zero
 test_menu_select_falls_back_to_plain
 test_menu_gate_nontty_help
 test_menu_gate_no_menu_env
 test_menu_exit_item
 test_menu_pack_e2e
 test_menu_cancel_returns_cleanly
+test_menu_deliver_guard_fail_closed
 test_ui_raw_off_idempotent
 test_pack_excludes
 test_pack_excludes_empty

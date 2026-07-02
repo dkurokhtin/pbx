@@ -694,7 +694,7 @@ ui_dim() {
 # ui_summary <ветка> <MR-цель> <сообщение> — итоговый блок доставки, только TTY.
 ui_summary() {
   (( UI_COLOR_OUT )) || return 0
-  printf ' %s%s%s ветка      %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$1"
+  printf ' %s%s%s ветка      %s\n' "$C_GREY" "$G_BAR" "$C_RESET" "$1"
   printf ' %s%s%s MR →       %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$2"
   printf ' %s%s%s сообщение  %s\n' "$C_GREY" "$G_END" "$C_RESET" "$3"
 }
@@ -713,8 +713,8 @@ menu_select_plain() {
     IFS= read -r choice || return 130
     choice="$(strip_cr "$choice")"
     [[ "$choice" == q ]] && return 130
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
-      printf '%s\n' "$((choice-1))"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= n )); then
+      printf '%s\n' "$((10#$choice-1))"
       return 0
     fi
   done
@@ -863,6 +863,7 @@ menu_project_flow() {
 cmd_menu() {
   require_wsl
   trap 'ui_raw_off' EXIT          # страховка: терминал не остаётся в raw при любом выходе
+  trap 'ui_raw_off; exit 130' INT TERM
   local idx
   local -a items=(
     'pack    — упаковать проект в архив'
