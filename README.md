@@ -30,11 +30,22 @@ gitlab нет), а MR открывается с рабочего ноутбук�
 flowchart LR
     subgraph home["🏠 рабочая машина"]
         edit["правки в SRC"] --> pack["pbx pack → архив в _dist"]
+        edit --> push["pbx push → снапшот в зеркало"]
+        corp["pbx corp: картина корп-репо до доставки"]
+    end
+    subgraph mirror["☁️ личное GitHub-зеркало"]
+        mbr["ветка снапшота"]
+        mst["служебная ветка pbx/state"]
     end
     subgraph host["🖥️ машина с git-репозиторием"]
         deliver["pbx deliver: ветка + guard + коммит"] --> mr["MR / PR в TARGET_BRANCH"]
+        snap["pbx snapshot: снимок состояния корп-реп"]
     end
-    pack -.->|перенос архива| deliver
+    pack -.->|"перенос архива"| deliver
+    push --> mbr
+    mbr -->|"deliver --mirror"| deliver
+    snap --> mst
+    mst -.->|"читается дома"| corp
 ```
 
 ## Команды
@@ -42,17 +53,22 @@ flowchart LR
     pbx add     <имя> [путь]                          завести проект в реестр (SRC=путь|$PWD)
     pbx scan    (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
     pbx list                                          показать проекты (реестр ∪ WORKSPACE)
+    pbx status  [имя] [--json]                        сводка: ветка, правки, дрейф, зеркало
     pbx pack    <имя>                                 упаковать SRC в _dist/<имя>.tar.gz
-    pbx deliver <имя> <ветка> <сообщение> [архив] [--yes]  разложить в REPO, ветка, коммит, MR/PR
+    pbx push    <имя> [ветка]                         снапшот рабочего дерева → ветка зеркала (MIRROR)
+    pbx deliver <имя> <ветка> <сообщение> [архив] [--yes] [--mirror]  разложить в REPO, ветка, коммит, MR/PR
+    pbx snapshot [имя]                                НОУТ: снимок корп-состояния → ветка pbx/state зеркала
+    pbx corp    [имя] [--json]                        ДОМ: показать снимок корп-состояния из зеркала
     pbx log     [имя]                                 диагностика для ИИ-агента (stdout + лог-файл)
     pbx help
 
 ## Интерактивное меню
 
 Голый `pbx` в терминале открывает меню: стрелки ↑/↓ (или j/k, или цифры),
-Enter — выбрать, Esc/q — отмена. Пункты pack/deliver/log ведут через выбор
-проекта; deliver дальше спросит ветку (подставит `feature/`) и сообщение —
-и выполнит обычный `pbx deliver` со всеми страховками (guard остаётся).
+Enter — выбрать, Esc/q — отмена. Пункты pack/push/deliver/log ведут через
+выбор проекта; deliver дальше спросит ветку (подставит `feature/`) и
+сообщение — и выполнит обычный `pbx deliver` со всеми страховками (guard
+остаётся). Пункты snapshot и corp проходят сразу по всем проектам с MIRROR.
 
 Меню включается только когда stdin и stdout — терминал. Скрипты и ИИ-агенты
 ничего не заметят: `pbx` без аргументов в пайпе печатает справку, как раньше.
