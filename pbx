@@ -530,7 +530,57 @@ pack_exclude_pathspecs() {
 
 # Полный 40-hex SHA? Перед КАЖДЫМ push обязательна: пустой src-ref в refspec
 # (git push M "":refs/heads/B) — это синтаксис УДАЛЕНИЯ ветки на remote.
-_pbx_is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+_pbx_is_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]]; }
+
+# snapshot_tree <SRC> → SHA дерева (write-tree) ТЕКУЩЕГО рабочего дерева SRC
+# (staged+unstaged+untracked минус excludes). Весь монтаж — в теневом индексе
+# (GIT_INDEX_FILE); реальный .git/index только ЧИТАЕТСЯ (cp).
+# Грабли (обе воспроизведены):
+#  - существующий ПУСТОЙ файл индекса → fatal "index file smaller than expected";
+#    отсутствующий путь — ок. Поэтому mktemp → сразу rm -f.
+#  - теневой индекс сеем КОПИЕЙ реального: с пустым индексом файл, трекнутый ДО
+#    появления его паттерна в .gitignore, с незакоммиченной правкой — молча
+#    теряет правку (git add -A считает его новым untracked и режет по ignore).
+#    Untracked-мусор при этом по-прежнему фильтруется .gitignore — осознанное
+#    отличие от pack (секреты не уезжают в личное зеркало; спека §2.1 п.4).
+snapshot_tree() {
+  local src="$1"
+  local real_index tmp_index
+  real_index="$(git -C "$src" rev-parse --git-path index 2>/dev/null || true)"
+  [[ -n "$real_index" ]] || { c_warn "snapshot: не git-репозиторий: $src"; return 1; }
+  [[ "$real_index" == /* ]] || real_index="$src/$real_index"
+
+  tmp_index="$(mktemp -t pbx-push-index.XXXXXX)" || { c_warn "snapshot: mktemp не удался"; return 1; }
+  if [[ -f "$real_index" ]]; then
+    cp -- "$real_index" "$tmp_index" \
+      || { rm -f "$tmp_index"; c_warn "snapshot: не удалось скопировать индекс"; return 1; }
+  else
+    rm -f "$tmp_index"   # свежий репо без коммитов — старт с пустого индекса
+  fi
+
+  local -a pathspecs=(".")
+  local ps
+  while IFS= read -r ps; do pathspecs+=("$ps"); done < <(pack_exclude_pathspecs)
+
+  # вывод git ловим в переменные: warning на stderr не должен испортить $tree
+  local add_out
+  if ! add_out="$(GIT_INDEX_FILE="$tmp_index" git -C "$src" add -A -- "${pathspecs[@]}" 2>&1)"; then
+    rm -f "$tmp_index"
+    c_warn "snapshot: git add в теневой индекс не удался: $add_out"
+    return 1
+  fi
+
+  local tree
+  if ! tree="$(GIT_INDEX_FILE="$tmp_index" git -C "$src" write-tree 2>/dev/null)"; then
+    rm -f "$tmp_index"
+    c_warn "snapshot: write-tree не удался"
+    return 1
+  fi
+  rm -f "$tmp_index"
+  _pbx_is_sha "$tree" || { c_warn "snapshot: write-tree вернул не SHA ('$tree')"; return 1; }
+  printf '%s\n' "$tree"
+  return 0
+}
 
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {

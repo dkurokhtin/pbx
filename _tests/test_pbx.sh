@@ -795,6 +795,80 @@ test_load_config_mirror() {
   rm -rf "$ws" "$reg"
 }
 
+# --- Э2: snapshot_tree -------------------------------------------------------------
+# Фикстура: git-репо с .gitignore(*.log), staged+unstaged+untracked правками,
+# вложенным node_modules, tracked-но-ignored файлом с правкой (реальный кейс).
+_mk_snapshot_fixture() {
+  SN_SRC="$(make_ws)"
+  ( cd "$SN_SRC" \
+    && git init -q . && git config user.email t@t && git config user.name t \
+    && printf '*.log\n' > .gitignore \
+    && mkdir -p app sub/nested/node_modules/pkg node_modules/x .claude \
+    && echo base > tracked.txt && echo code > app/main.py \
+    && echo old > important.log && git add -f important.log \
+    && echo ctx > CLAUDE.md && echo s > .claude/cfg \
+    && echo junk1 > node_modules/x/j.js && echo junk2 > sub/nested/node_modules/pkg/j.js \
+    && git add .gitignore tracked.txt app/main.py \
+    && git commit -qm init \
+    && echo staged >> tracked.txt && git add tracked.txt \
+    && echo unstaged >> app/main.py \
+    && echo brandnew > sub/nested/new.txt \
+    && echo edited >> important.log \
+    && echo noise > debug.log ) >/dev/null 2>&1
+}
+
+test_snapshot_tree_contents() {
+  _mk_snapshot_fixture
+  local tree; tree="$(cd "$SN_SRC" && snapshot_tree "$SN_SRC")"
+  local rc=$?; assert_eq "snapshot: rc=0" "$rc" "0"
+  local files; files="$(git -C "$SN_SRC" ls-tree -r --name-only "$tree")"
+  assert_has "snapshot: staged-правка"        "$files" "tracked.txt"
+  assert_has "snapshot: unstaged-файл"        "$files" "app/main.py"
+  assert_has "snapshot: untracked-файл"       "$files" "sub/nested/new.txt"
+  assert_has "snapshot: tracked-но-ignored"   "$files" "important.log"
+  assert_no  "snapshot: без node_modules"     "$files" "node_modules"
+  assert_no  "snapshot: без CLAUDE.md"        "$files" "CLAUDE.md"
+  assert_no  "snapshot: без .claude"          "$files" ".claude"
+  assert_no  "snapshot: gitignored untracked отфильтрован" "$files" "debug.log"
+  # содержимое, не только имена: правки реально в дереве
+  assert_has "snapshot: правка staged в дереве" \
+    "$(git -C "$SN_SRC" cat-file -p "$tree:tracked.txt")" "staged"
+  assert_has "snapshot: правка tracked-ignored в дереве" \
+    "$(git -C "$SN_SRC" cat-file -p "$tree:important.log")" "edited"
+  rm -rf "$SN_SRC"
+}
+
+test_snapshot_tree_src_untouched() {
+  _mk_snapshot_fixture
+  local head0 status0 index_before
+  head0="$(git -C "$SN_SRC" rev-parse HEAD)"
+  status0="$(git -C "$SN_SRC" status --porcelain)"   # status может освежить index (racy-git) — снимаем копию ПОСЛЕ него
+  index_before="$(make_ws)/index.bin"
+  cp "$SN_SRC/.git/index" "$index_before"
+  snapshot_tree "$SN_SRC" >/dev/null
+  # cmp — ПЕРВЫМ (до любых git status, которые сами трогают index)
+  if cmp -s "$index_before" "$SN_SRC/.git/index"; then
+    ok "SRC: .git/index байт-в-байт прежний"
+  else
+    bad "SRC: .git/index ИЗМЕНЁН"
+  fi
+  assert_eq "SRC: HEAD не тронут"   "$(git -C "$SN_SRC" rev-parse HEAD)" "$head0"
+  assert_eq "SRC: status не тронут" "$(git -C "$SN_SRC" status --porcelain)" "$status0"
+  assert_eq "SRC: stash пуст" "$(git -C "$SN_SRC" stash list)" ""
+  rm -rf "$SN_SRC" "$(dirname "$index_before")"
+}
+
+test_snapshot_tree_orphan_src() {
+  local src; src="$(make_ws)"
+  ( cd "$src" && git init -q . && echo x > f.txt ) >/dev/null 2>&1
+  local tree rc=0
+  tree="$( (cd "$src" && snapshot_tree "$src") )" || rc=$?
+  assert_eq "orphan SRC: rc=0" "$rc" "0"
+  assert_has "orphan SRC: файл в дереве" \
+    "$(git -C "$src" ls-tree -r --name-only "$tree")" "f.txt"
+  rm -rf "$src"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -1237,6 +1311,9 @@ test_pack_exclude_pathspecs_forms
 test_pack_exclude_pathspecs_extra
 test_pbx_is_sha
 test_load_config_mirror
+test_snapshot_tree_contents
+test_snapshot_tree_src_untouched
+test_snapshot_tree_orphan_src
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo
