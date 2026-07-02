@@ -1273,7 +1273,7 @@ menu_pause() {
   return 0
 }
 
-# menu_project_flow <pack|deliver|log>: выбор проекта → параметры → вызов cmd_*.
+# menu_project_flow <pack|push|deliver|log>: выбор проекта → параметры → вызов cmd_*.
 # rc=0 — команда выполнена, выйти из меню; rc=1 — вернуться в меню.
 menu_project_flow() {
   local action="$1" idx project branch msg
@@ -1288,6 +1288,25 @@ menu_project_flow() {
   case "$action" in
     pack)
       cmd_pack "$project"
+      return 0
+      ;;
+    push)
+      load_config "$project"
+      local cur_branch=''
+      cur_branch="$(git -C "$SRC" branch --show-current 2>/dev/null || true)"
+      if [[ -t 0 ]]; then
+        read -e -r -i "$cur_branch" -p "Ветка зеркала: " branch || return 1
+      else
+        printf 'Ветка зеркала: ' >&2
+        IFS= read -r branch || return 1
+      fi
+      branch="$(strip_cr "$branch")"
+      [[ -n "$branch" ]] || branch="$cur_branch"
+      if [[ -z "$branch" ]]; then
+        c_warn "(ветка не определена — отмена)"
+        return 1
+      fi
+      cmd_push "$project" "$branch"
       return 0
       ;;
     log)
@@ -1329,6 +1348,7 @@ cmd_menu() {
   local idx
   local -a items=(
     'pack    — упаковать проект в архив'
+    'push    — снапшот рабочего дерева в зеркало'
     'deliver — доставить архив в репо (ветка + MR)'
     'log     — диагностика проекта'
     'status  — сводка по проектам'
@@ -1342,14 +1362,15 @@ cmd_menu() {
     idx="$(menu_select "pbx — что делаем?" "${items[@]}")" || { printf '\n' >&2; return 0; }
     case "$idx" in
       0) if menu_project_flow pack;    then return 0; fi ;;
-      1) if menu_project_flow deliver; then return 0; fi ;;
-      2) menu_project_flow log || true ;;
-      3) cmd_status; menu_pause ;;
-      4) cmd_list; menu_pause ;;
-      5) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      6) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      7) cmd_help; menu_pause ;;
-      8) return 0 ;;
+      1) if menu_project_flow push;    then return 0; fi ;;
+      2) if menu_project_flow deliver; then return 0; fi ;;
+      3) menu_project_flow log || true ;;
+      4) cmd_status; menu_pause ;;
+      5) cmd_list; menu_pause ;;
+      6) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      7) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      8) cmd_help; menu_pause ;;
+      9) return 0 ;;
     esac
   done
 }
