@@ -886,6 +886,35 @@ test_snapshot_tree_orphan_src() {
   rm -rf "$src"
 }
 
+test_snapshot_tree_tracked_excluded_dropped() {
+  # I1: закоммиченные excluded-файлы НЕ должны попадать в снапшот
+  local src; src="$(make_ws)"
+  ( cd "$src" && git init -q . && git config user.email t@t && git config user.name t \
+    && printf '*.log\n' > .gitignore \
+    && mkdir -p node_modules/pkg __pycache__ \
+    && echo ctx > CLAUDE.md && echo conf > .pbx.conf \
+    && echo junk > node_modules/pkg/keep.js && echo pyc > app.pyc && echo c > __pycache__/x.txt \
+    && echo real > app.js \
+    && echo old > important.log && git add -f important.log \
+    && git add -A -- . ':(glob,exclude)нет-такого' \
+    && git add -f CLAUDE.md .pbx.conf node_modules/pkg/keep.js app.pyc __pycache__/x.txt \
+    && git commit -qm init \
+    && echo edited >> important.log ) >/dev/null 2>&1
+  local tree; tree="$(cd "$src" && snapshot_tree "$src")"
+  local files; files="$(git -C "$src" ls-tree -r --name-only "$tree")"
+  assert_no  "tracked-excluded: CLAUDE.md выброшен"     "$files" "CLAUDE.md"
+  assert_no  "tracked-excluded: .pbx.conf выброшен"     "$files" ".pbx.conf"
+  assert_no  "tracked-excluded: node_modules выброшен"  "$files" "node_modules"
+  assert_no  "tracked-excluded: *.pyc выброшен"         "$files" "app.pyc"
+  assert_no  "tracked-excluded: __pycache__ выброшен"   "$files" "__pycache__"
+  assert_has "tracked-excluded: обычный файл на месте"  "$files" "app.js"
+  # регресс грабли №2: tracked-ignored с правкой ПО-ПРЕЖНЕМУ в снапшоте
+  assert_has "tracked-excluded: important.log цел (грабля №2 не сломана)" "$files" "important.log"
+  assert_has "tracked-excluded: правка important.log в дереве" \
+    "$(git -C "$src" cat-file -p "$tree:important.log")" "edited"
+  rm -rf "$src"
+}
+
 # --- Э2: push_snapshot / cmd_push (зеркало = локальный bare) -----------------------
 _mk_push_fixture() {
   PU_BASE="$(make_ws)"
@@ -1481,6 +1510,7 @@ test_load_config_mirror
 test_snapshot_tree_contents
 test_snapshot_tree_src_untouched
 test_snapshot_tree_orphan_src
+test_snapshot_tree_tracked_excluded_dropped
 test_push_snapshot_first_and_ff
 test_push_snapshot_no_changes
 test_push_snapshot_concurrent_commit_survives

@@ -506,7 +506,9 @@ cmd_status() {
 #  push (Э2): снапшот РАБОЧЕГО ДЕРЕВА SRC → ветка личного GitHub-зеркала.
 #  Механика проверена вживую (см. спеку §4): теневой индекс поверх КОПИИ
 #  реального, commit-tree с parent-chain, push БЕЗ --force.
-#  SRC (HEAD/индекс/staging/stash/.git/config) не трогаем НИГДЕ.
+#  SRC (HEAD/индекс/staging/stash/.git/config) не трогаем НИГДЕ; след в SRC —
+#  FETCH_HEAD и незареференсированные объекты в .git/objects (уходят при
+#  git gc); refs/HEAD/индекс/config не тронуты.
 # =============================================================================
 
 # Транслирует pack_exclude_args() (единственный источник истины об исключениях)
@@ -545,7 +547,8 @@ _pbx_is_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]]; }
 #    отличие от pack (секреты не уезжают в личное зеркало; спека §2.1 п.4).
 snapshot_tree() {
   local src="$1"
-  local real_index tmp_index
+  local real_index tmp_index ps rm_out
+  local -a inc_specs
   real_index="$(git -C "$src" rev-parse --git-path index 2>/dev/null || true)"
   [[ -n "$real_index" ]] || { c_warn "snapshot: не git-репозиторий: $src"; return 1; }
   [[ "$real_index" == /* ]] || real_index="$src/$real_index"
@@ -559,7 +562,6 @@ snapshot_tree() {
   fi
 
   local -a pathspecs=(".")
-  local ps
   while IFS= read -r ps; do pathspecs+=("$ps"); done < <(pack_exclude_pathspecs)
 
   # вывод git ловим в переменные: warning на stderr не должен испортить $tree
@@ -568,6 +570,23 @@ snapshot_tree() {
     rm -f "$tmp_index"
     c_warn "snapshot: git add в теневой индекс не удался: $add_out"
     return 1
+  fi
+
+  # Дочистка: exclude-pathspec не убирает УЖЕ ОТСЛЕЖИВАЕМЫЕ (закоммиченные)
+  # excluded-файлы из посеянного копией индекса — git add их просто не трогает.
+  # Убираем их инклюзивными glob-путями тех же имён (I1 финального ревью).
+  # Грабля №2 (tracked-ignored important.log) не страдает: чистим только
+  # фикс-список pack-excludes, а не всё gitignored.
+  inc_specs=()
+  while IFS= read -r ps; do
+    inc_specs+=("${ps/:(glob,exclude)/:(glob)}")
+  done < <(pack_exclude_pathspecs)
+  if (( ${#inc_specs[@]} > 0 )); then
+    if ! rm_out="$(GIT_INDEX_FILE="$tmp_index" git -C "$src" rm -r --cached --ignore-unmatch -q -- "${inc_specs[@]}" 2>&1)"; then
+      rm -f "$tmp_index"
+      c_warn "snapshot: дочистка excluded из теневого индекса не удалась: $rm_out"
+      return 1
+    fi
   fi
 
   local tree
