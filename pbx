@@ -449,6 +449,20 @@ status_collect() {
 # экранирование строки для ручной JSON-сборки (jq в системе нет)
 _json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
 
+# JSON-экранирование для corp-state: + управляющие символы (сырой таб в сабжекте
+# ломает JSON — воспроизведено). ПОРЯДОК ЗАМЕН КРИТИЧЕН: backslash первым.
+# _json_str остаётся для status_json (совместимость поверхности Э1).
+_json_str_v2() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//[$'\x01'-$'\x08\x0b\x0c\x0e'-$'\x1f']/}"
+  printf '%s' "$s"
+}
+
 # Выравнивание по СИМВОЛАМ, не байтам: printf %-Ns считает байты — кириллица/…/— ломают колонки
 # (local в два шага: n=${#t} в одной строке с local t=… падает под set -u — expansion раньше присваивания)
 pad()  { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%s%*s' "$t" $((w - n)) ''; fi; }
@@ -759,6 +773,196 @@ cmd_push() {
     "PUSH_SOURCE_COMMIT=$src_head"
   c_green "✅ $project: снапшот рабочего дерева ушёл в зеркало веткой '$branch' (${sha:0:7})"
   ui_summary "$branch" "$MIRROR" "снапшот ${sha:0:7} (вкл. незакоммиченное)"
+  return 0
+}
+
+# =============================================================================
+#  corp-state (Э3): обратный поток — состояние корп-репо через служебную
+#  ветку pbx/state личного зеркала. Механики проверены вживую (спека §4-6,
+#  референс .superpowers/sdd/e3-research.md).
+#  КРИТИЧНО: у state-коммитов НЕТ родителей из корп-истории — push считает
+#  reachability и утащил бы ВСЮ историю корп-репо в зеркало (воспроизведено).
+# =============================================================================
+
+# Имя служебной ветки состояния в зеркале (захардкожено — спека §2.1 п.2).
+PBX_STATE_BRANCH="pbx/state"
+# Префиксы «доставленных» веток (конвенция deliver).
+CORP_BRANCH_PREFIXES=(feature fix hotfix bugfix chore)
+
+# corp_collect_state <REPO> <BASE> — заполняет CS_*-глобали состоянием корп-репо.
+# Только чтение. Сетевые сбои НЕ фатальны: CS_FETCH_OK=false, сбор продолжается
+# по последним известным remote-refs (проверено вживую).
+corp_collect_state() {
+  local repo="$1" base="$2"
+  CS_REPO="$repo"; CS_BASE_BRANCH="$base"
+  CS_FETCH_OK=true; CS_BASE_REF=''; CS_ORIGIN=''; CS_CURRENT_BRANCH=''
+  CS_DIRTY=-1; CS_IN_MERGE=false
+  CS_BASE_SHA=''; CS_BASE_DATE=-1; CS_BASE_SUBJ=''
+  CS_LOG=''; CS_BRANCHES=''; CS_BRANCHES_TOTAL=0
+
+  if ! GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$repo" fetch -q origin --prune 2>/dev/null; then
+    CS_FETCH_OK=false
+  fi
+  CS_ORIGIN="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+  CS_CURRENT_BRANCH="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+  local st_out=''
+  if st_out="$(git -C "$repo" status --porcelain 2>/dev/null)"; then
+    CS_DIRTY="$(printf '%s' "$st_out" | grep -c . || true)"
+  fi
+  local mh
+  mh="$(git -C "$repo" rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
+  if [[ -n "$mh" ]]; then
+    [[ "$mh" == /* ]] || mh="$repo/$mh"
+    [[ -e "$mh" ]] && CS_IN_MERGE=true
+  fi
+
+  if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then
+    CS_BASE_REF="origin/$base"
+    local tip rest
+    tip="$(git -C "$repo" log -1 "$CS_BASE_REF" --format=$'%H\t%ct\t%s' 2>/dev/null || true)"
+    if [[ -n "$tip" ]]; then
+      CS_BASE_SHA="${tip%%$'\t'*}"
+      rest="${tip#*$'\t'}"
+      CS_BASE_DATE="${rest%%$'\t'*}"
+      CS_BASE_SUBJ="${rest#*$'\t'}"
+    fi
+    CS_LOG="$(git -C "$repo" log "$CS_BASE_REF" -20 --format=$'%h\t%cs\t%s' 2>/dev/null || true)"
+  fi
+
+  # доставленные ветки: origin/<префиксы>/* + local-only тех же префиксов;
+  # паттерн без /* работает как префикс всей иерархии (проверено)
+  local -a rpat=() lpat=()
+  local p
+  for p in "${CORP_BRANCH_PREFIXES[@]}"; do
+    rpat+=("refs/remotes/origin/$p"); lpat+=("refs/heads/$p")
+  done
+  local remote_list local_list merged=''
+  remote_list="$(git -C "$repo" for-each-ref --sort=-committerdate \
+    --format=$'%(refname:lstrip=3)\tremote\t%(objectname:short)\t%(committerdate:unix)\t%(committerdate:short)' \
+    "${rpat[@]}" 2>/dev/null || true)"
+  local_list="$(git -C "$repo" for-each-ref --sort=-committerdate \
+    --format=$'%(refname:short)\tlocal\t%(objectname:short)\t%(committerdate:unix)\t%(committerdate:short)' \
+    "${lpat[@]}" 2>/dev/null || true)"
+  merged="$remote_list"
+  local line b
+  if [[ -n "$local_list" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      b="${line%%$'\t'*}"
+      git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$b" 2>/dev/null && continue
+      if [[ -n "$merged" ]]; then merged+=$'\n'"$line"; else merged="$line"; fi
+    done <<< "$local_list"
+  fi
+  if [[ -n "$merged" ]]; then
+    merged="$(printf '%s\n' "$merged" | sort -t$'\t' -k4,4nr)"
+  fi
+  CS_BRANCHES_TOTAL="$(printf '%s' "$merged" | grep -c . || true)"
+  local capped
+  capped="$(printf '%s' "$merged" | head -30)"
+
+  local name where sha7 cdu cds ref behind ahead shortstat lr
+  while IFS=$'\t' read -r name where sha7 cdu cds || [[ -n "$name" ]]; do
+    [[ -n "$name" ]] || continue
+    if [[ "$where" == remote ]]; then ref="origin/$name"; else ref="$name"; fi
+    behind='-'; ahead='-'; shortstat='-'
+    if [[ -n "$CS_BASE_REF" ]]; then
+      # порядок вывода rev-list --left-right: СЛЕВА behind (только в BASE),
+      # СПРАВА ahead (только в ветке) — доказано на фикстуре (спека §5)
+      lr="$(git -C "$repo" rev-list --left-right --count "$CS_BASE_REF...$ref" 2>/dev/null || true)"
+      if [[ -n "$lr" ]]; then behind="${lr%%$'\t'*}"; ahead="${lr##*$'\t'}"; fi
+      # three-dot = от merge-base; влитая ветка → пустой stdout, rc=0 → '-'
+      shortstat="$(git -C "$repo" diff --shortstat "$CS_BASE_REF...$ref" 2>/dev/null | sed 's/^ *//' || true)"
+      [[ -n "$shortstat" ]] || shortstat='-'
+    fi
+    CS_BRANCHES+="${name}"$'\t'"${where}"$'\t'"${sha7}"$'\t'"${ahead}"$'\t'"${behind}"$'\t'"${cds}"$'\t'"${shortstat}"$'\n'
+  done <<< "$capped"
+  return 0
+}
+
+# corp_state_files <каталог> <проект> — записать 4 state-файла из CS_*-глобалей.
+# state.json — однострочный (corp --json встраивает его сырым); state.env —
+# KEY=value (читатели sed, НЕ source; значения строго однострочные); TSV —
+# свободный текст последним полем, средние поля не пусты (сентинель '-').
+corp_state_files() {
+  local dir="$1" project="$2"
+  local gen_at host
+  gen_at="$(date +%s)"
+  host="$(hostname 2>/dev/null || echo '-')"
+
+  printf '%s' "$CS_BRANCHES" > "$dir/branches.tsv"
+  if [[ -n "$CS_LOG" ]]; then printf '%s\n' "$CS_LOG" > "$dir/log.tsv"; else : > "$dir/log.tsv"; fi
+
+  # значения state.env строго однострочные: обрезка до первой строки
+  # (перевод строки в значении инжектит фейковый ключ — воспроизведено)
+  local subj_env="${CS_BASE_SUBJ%%$'\n'*}"
+  {
+    printf '# pbx corp-state: проект %s, автогенерация snapshot\n' "$project"
+    printf 'PBX_STATE_VERSION=1\n'
+    printf 'PROJECT=%s\n' "$project"
+    printf 'GENERATED_AT=%s\n' "$gen_at"
+    printf 'HOST=%s\n' "$host"
+    printf 'REPO=%s\n' "$CS_REPO"
+    printf 'FETCH_OK=%s\n' "$CS_FETCH_OK"
+    printf 'ORIGIN=%s\n' "$CS_ORIGIN"
+    printf 'BASE_BRANCH=%s\n' "$CS_BASE_BRANCH"
+    printf 'BASE_REF=%s\n' "$CS_BASE_REF"
+    printf 'CURRENT_BRANCH=%s\n' "$CS_CURRENT_BRANCH"
+    printf 'DIRTY=%s\n' "$CS_DIRTY"
+    printf 'IN_MERGE=%s\n' "$CS_IN_MERGE"
+    printf 'BASE_SHA=%s\n' "${CS_BASE_SHA:--}"
+    printf 'BASE_DATE=%s\n' "$CS_BASE_DATE"
+    printf 'BASE_SUBJECT=%s\n' "${subj_env:--}"
+    printf 'BRANCHES_TOTAL=%s\n' "$CS_BRANCHES_TOTAL"
+  } > "$dir/state.env"
+
+  {
+    printf '{'
+    printf '"schema":1'
+    printf ',"project":"%s"' "$(_json_str_v2 "$project")"
+    printf ',"generated_at":%s' "$gen_at"
+    printf ',"host":"%s"' "$(_json_str_v2 "$host")"
+    printf ',"repo":"%s"' "$(_json_str_v2 "$CS_REPO")"
+    printf ',"fetch_ok":%s' "$CS_FETCH_OK"
+    printf ',"origin":"%s"' "$(_json_str_v2 "$CS_ORIGIN")"
+    printf ',"base_branch":"%s"' "$(_json_str_v2 "$CS_BASE_BRANCH")"
+    printf ',"base_ref":"%s"' "$(_json_str_v2 "$CS_BASE_REF")"
+    printf ',"current_branch":"%s"' "$(_json_str_v2 "$CS_CURRENT_BRANCH")"
+    printf ',"dirty":%s' "$CS_DIRTY"
+    printf ',"in_merge":%s' "$CS_IN_MERGE"
+    if [[ -n "$CS_BASE_SHA" ]]; then
+      printf ',"base":{"sha":"%s","date":%s,"subject":"%s"}' \
+        "$CS_BASE_SHA" "$CS_BASE_DATE" "$(_json_str_v2 "$CS_BASE_SUBJ")"
+    else
+      printf ',"base":null'
+    fi
+    printf ',"log":['
+    local first=1 sha7 cdate subj
+    if [[ -n "$CS_LOG" ]]; then
+      while IFS=$'\t' read -r sha7 cdate subj || [[ -n "$sha7" ]]; do
+        [[ -n "$sha7" ]] || continue
+        if (( first )); then first=0; else printf ','; fi
+        printf '{"sha7":"%s","date":"%s","subject":"%s"}' \
+          "$sha7" "$cdate" "$(_json_str_v2 "$subj")"
+      done <<< "$CS_LOG"
+    fi
+    printf ']'
+    printf ',"branches":['
+    first=1
+    local bname bwhere bsha7 bahead bbehind bdate bstat aj bj
+    if [[ -n "$CS_BRANCHES" ]]; then
+      while IFS=$'\t' read -r bname bwhere bsha7 bahead bbehind bdate bstat || [[ -n "$bname" ]]; do
+        [[ -n "$bname" ]] || continue
+        if (( first )); then first=0; else printf ','; fi
+        aj="$bahead"; [[ "$aj" == '-' ]] && aj=null
+        bj="$bbehind"; [[ "$bj" == '-' ]] && bj=null
+        printf '{"name":"%s","where":"%s","sha7":"%s","ahead":%s,"behind":%s,"last_date":"%s","shortstat":"%s"}' \
+          "$(_json_str_v2 "$bname")" "$bwhere" "$bsha7" "$aj" "$bj" "$bdate" "$(_json_str_v2 "$bstat")"
+      done <<< "$CS_BRANCHES"
+    fi
+    printf ']'
+    printf ',"branches_total":%s' "$CS_BRANCHES_TOTAL"
+    printf '}\n'
+  } > "$dir/state.json"
   return 0
 }
 

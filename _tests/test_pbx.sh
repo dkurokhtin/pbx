@@ -1505,6 +1505,123 @@ test_scan_no_descend_into_repo() {
   rm -rf "$ws"
 }
 
+# --- Э3: _json_str_v2 и сбор корп-состояния ------------------------------------
+test_json_str_v2_escapes() {
+  assert_eq "v2: кавычки"     "$(_json_str_v2 'a"b')" 'a\"b'
+  assert_eq "v2: бэкслеш"     "$(_json_str_v2 'a\b')" 'a\\b'
+  assert_eq "v2: таб"         "$(_json_str_v2 $'a\tb')" 'a\tb'
+  assert_eq "v2: CR"          "$(_json_str_v2 $'a\rb')" 'a\rb'
+  assert_eq "v2: LF"          "$(_json_str_v2 $'a\nb')" 'a\nb'
+  assert_eq "v2: \\ первым (нет двойного экрана)" "$(_json_str_v2 '\')" '\\'
+  assert_eq "v2: C0 вычищаются" "$(_json_str_v2 $'a\x01b')" 'ab'
+}
+
+# Фикстура Э3: bare-«gitlab» + рабочий REPO. Ветки: feature/AAA-1 (remote,
+# ahead 1 / behind 1), fix/BBB-2 (remote-only, влита: ahead 0 / behind 1),
+# feature/CCC-3 (local-only). Глобали: CE_BASE, CE_ORIGIN, CE_REPO.
+_mk_corp_fixture() {
+  CE_BASE="$(mktemp -d)"
+  CE_ORIGIN="$CE_BASE/origin.git"; CE_REPO="$CE_BASE/repo"
+  git init -q --bare "$CE_ORIGIN"
+  git init -q -b dev "$CE_REPO"
+  ( cd "$CE_REPO" \
+    && git config user.email t@t && git config user.name t \
+    && git remote add origin "$CE_ORIGIN" \
+    && echo base > f.txt && git add -A && git commit -qm 'первый: "кавычки" и \бэкслеш' \
+    && echo more >> f.txt && git commit -qam 'второй: 100% кириллица' \
+    && git push -qu origin dev \
+    && git checkout -qb feature/AAA-1 \
+    && echo feat > feat.txt && git add -A && git commit -qm 'фича AAA' \
+    && git push -q origin feature/AAA-1 \
+    && git checkout -q dev \
+    && git checkout -qb fix/BBB-2 && git checkout -q dev \
+    && git push -q origin fix/BBB-2 \
+    && git branch -q -D fix/BBB-2 \
+    && git checkout -qb feature/CCC-3 \
+    && echo c3 > c3.txt && git add -A && git commit -qm 'локальная CCC' \
+    && git checkout -q dev \
+    && echo newer >> f.txt && git commit -qam 'третий dev-коммит' \
+    && git push -q origin dev ) >/dev/null 2>&1
+}
+
+test_corp_collect_state_branches() {
+  _mk_corp_fixture
+  corp_collect_state "$CE_REPO" dev
+  assert_eq  "collect: fetch_ok"            "$CS_FETCH_OK" "true"
+  assert_eq  "collect: base_ref"            "$CS_BASE_REF" "origin/dev"
+  assert_has "collect: сабжект верхушки"    "$CS_BASE_SUBJ" "третий dev-коммит"
+  assert_eq  "collect: total=3"             "$CS_BRANCHES_TOTAL" "3"
+  local aaa; aaa="$(printf '%s' "$CS_BRANCHES" | grep '^feature/AAA-1')"
+  assert_has "collect: AAA remote"          "$aaa" $'\tremote\t'
+  assert_eq  "collect: AAA ahead=1 behind=1" "$(printf '%s' "$aaa" | cut -f4,5)" $'1\t1'
+  local bbb; bbb="$(printf '%s' "$CS_BRANCHES" | grep '^fix/BBB-2')"
+  assert_eq  "collect: влитая BBB ahead=0"  "$(printf '%s' "$bbb" | cut -f4)" "0"
+  assert_eq  "collect: влитая BBB shortstat='-'" "$(printf '%s' "$bbb" | cut -f7)" "-"
+  local ccc; ccc="$(printf '%s' "$CS_BRANCHES" | grep '^feature/CCC-3')"
+  assert_has "collect: CCC local-only"      "$ccc" $'\tlocal\t'
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_no_base() {
+  _mk_corp_fixture
+  corp_collect_state "$CE_REPO" nosuchbase
+  assert_eq "collect: base_ref пуст без базы" "$CS_BASE_REF" ""
+  assert_eq "collect: base_sha пуст"          "$CS_BASE_SHA" ""
+  assert_eq "collect: лог пуст"               "$CS_LOG" ""
+  local aaa; aaa="$(printf '%s' "$CS_BRANCHES" | grep '^feature/AAA-1')"
+  assert_eq "collect: ahead='-' без базы"     "$(printf '%s' "$aaa" | cut -f4)" "-"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_fetch_fail() {
+  _mk_corp_fixture
+  ( cd "$CE_REPO" && git remote set-url origin "$CE_BASE/nope.git" )
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: fetch_ok=false при сбое origin" "$CS_FETCH_OK" "false"
+  assert_eq "collect: старые remote-refs живы" "$CS_BASE_REF" "origin/dev"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_detached_and_merge() {
+  _mk_corp_fixture
+  ( cd "$CE_REPO" && git checkout -q "$(git rev-parse dev)" ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: detached HEAD → current_branch пуст" "$CS_CURRENT_BRANCH" ""
+  # незавершённый merge имитируем маркером MERGE_HEAD (детект — по его наличию)
+  ( cd "$CE_REPO" && git checkout -q dev && git rev-parse dev > .git/MERGE_HEAD )
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: MERGE_HEAD → in_merge=true" "$CS_IN_MERGE" "true"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_state_files_json_valid() {
+  _mk_corp_fixture
+  # гадкий сабжект: таб + кавычки + % + бэкслеш + кириллица
+  ( cd "$CE_REPO" && git commit -qam "$(printf 'га\tдкий: "q" 100%% \\x')" --allow-empty \
+    && git push -q origin dev ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  local d; d="$(make_ws)"
+  corp_state_files "$d" proj
+  local f
+  for f in state.json state.env branches.tsv log.tsv; do
+    if [[ -f "$d/$f" ]]; then ok "state-файл есть: $f"; else bad "нет файла: $f"; fi
+  done
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -m json.tool "$d/state.json" >/dev/null 2>&1; then
+      ok "state.json валиден (json.tool, гадкие сабжекты)"
+    else
+      bad "state.json НЕ валиден"
+    fi
+  fi
+  assert_eq  "state.env: PROJECT"       "$(sed -n 's/^PROJECT=//p' "$d/state.env")" "proj"
+  assert_has "state.env: BASE_SUBJECT"  "$(sed -n 's/^BASE_SUBJECT=//p' "$d/state.env")" "дкий"
+  assert_has "log.tsv: сабжект последним, таб внутри выжил" \
+    "$(head -1 "$d/log.tsv" | cut -f3-)" "дкий"
+  assert_eq  "branches.tsv: 7 полей у AAA" \
+    "$(grep '^feature/AAA-1' "$d/branches.tsv" | awk -F'\t' '{print NF}')" "7"
+  rm -rf "$CE_BASE" "$d"
+}
+
 test_source_no_run
 test_color_gated_in_pipe
 test_ui_flags_nontty
@@ -1604,6 +1721,12 @@ test_meta_update_bad_keys_skipped
 test_meta_update_crlf_normalized
 test_pack_meta_survives_push_keys
 test_cmd_push_writes_push_meta
+test_json_str_v2_escapes
+test_corp_collect_state_branches
+test_corp_collect_state_no_base
+test_corp_collect_state_fetch_fail
+test_corp_collect_state_detached_and_merge
+test_corp_state_files_json_valid
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo
