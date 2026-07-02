@@ -1767,6 +1767,122 @@ test_snapshot_cli_dispatch_and_help() {
   rm -rf "$CE_BASE" "$SN_REG" "$ws"
 }
 
+# --- Э3: pbx corp — чтение корп-состояния дома -----------------------------------
+test_corp_read_state_rc_semantics() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local d rc
+  # rc=2: зеркало есть, снимка нет
+  d="$(make_ws)"; rc=0
+  corp_read_state "$CE_MIRROR" "$d" || rc=$?
+  assert_eq "corp_read: rc=2 без снимка" "$rc" "2"
+  # rc=0: после снапшота, файлы на месте
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  rc=0; corp_read_state "$CE_MIRROR" "$d" || rc=$?
+  assert_eq "corp_read: rc=0 при снимке" "$rc" "0"
+  if [[ -s "$d/state.json" && -s "$d/state.env" ]]; then
+    ok "corp_read: файлы непустые"
+  else
+    bad "corp_read: файлы пустые"
+  fi
+  # rc=3: зеркало недоступно
+  rc=0; corp_read_state "$CE_BASE/nope.git" "$d" || rc=$?
+  assert_eq "corp_read: rc=3 при недоступном зеркале" "$rc" "3"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$d"
+}
+
+test_cmd_corp_renders_state() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: секция проекта"    "$out" "proj: снимок"
+  assert_has "corp: base_ref"          "$out" "origin/dev"
+  assert_has "corp: ветка AAA"         "$out" "feature/AAA-1"
+  assert_has "corp: лог dev"           "$out" "третий dev-коммит"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_no_snapshot_message() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: понятное «снимка ещё нет»" "$out" "снимка ещё нет"
+  assert_has "corp: подсказка про snapshot"    "$out" "pbx snapshot proj"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_unreachable_message() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_BASE/nope.git" > "$SN_REG/proj.conf"
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: «зеркало недоступно»" "$out" "недоступно"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_stale_and_fetchfail_warns() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # рукотворный протухший снимок с fetch_ok=false (сеем как чужой pbx snapshot)
+  local sd; sd="$(mktemp -d)"
+  ( git init -q -b pbx/state "$sd" && cd "$sd" \
+    && git config user.email p@p && git config user.name p \
+    && printf '{"schema":1,"project":"proj","generated_at":123}\n' > state.json \
+    && printf 'PBX_STATE_VERSION=1\nPROJECT=proj\nGENERATED_AT=123\nHOST=lap\nFETCH_OK=false\nBASE_REF=origin/dev\nBASE_SHA=abc\nBASE_SUBJECT=x\nCURRENT_BRANCH=dev\nDIRTY=0\nIN_MERGE=false\nBRANCHES_TOTAL=0\n' > state.env \
+    && : > branches.tsv && : > log.tsv \
+    && git add -A && git commit -qm seed \
+    && git push -q "$CE_MIRROR" pbx/state:refs/heads/pbx/state ) >/dev/null 2>&1
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: снимок протух (>24ч)"   "$out" "протух"
+  assert_has "corp: warn fetch_ok=false"    "$out" "без связи"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$sd"
+}
+
+test_cmd_corp_json_valid() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  # второй проект без MIRROR — в --json обязан попасть с available:false
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj2.conf"
+  local out; out="$( ( cmd_corp --json ) 2>/dev/null )"
+  assert_has "corp json: available true"   "$out" '"available":true'
+  assert_has "corp json: schema из state"  "$out" '"schema":1'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "corp json: валиден"
+    else
+      bad "corp json: НЕ валиден"
+    fi
+  fi
+  local out2; out2="$( ( cmd_corp proj2 --json ) 2>/dev/null )"
+  assert_has "corp json: без MIRROR → no-mirror" "$out2" '"reason":"no-mirror"'
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_tmp_cleanup() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local clean; clean="$(make_ws)"
+  ( TMPDIR="$clean" cmd_corp proj ) >/dev/null 2>&1
+  assert_eq "corp: tmp-репо убраны" \
+    "$(find "$clean" -maxdepth 1 -name 'pbx-corp-read.*' | wc -l | tr -d ' ')" "0"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$clean"
+}
+
+test_cmd_corp_cli_dispatch_and_help() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" corp proj 2>&1)" || rc=$?
+  assert_eq  "CLI: pbx corp проходит" "$rc" "0"
+  assert_has "CLI: секция вывода" "$out" "proj: снимок"
+  assert_has "help: команда corp" "$(bash "$PBX" help 2>&1)" "pbx corp"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
 test_source_no_run
 test_color_gated_in_pipe
 test_ui_flags_nontty
@@ -1880,6 +1996,14 @@ test_snapshot_no_mirror_dies
 test_snapshot_all_mode_summary
 test_snapshot_race_alien_survives
 test_snapshot_cli_dispatch_and_help
+test_corp_read_state_rc_semantics
+test_cmd_corp_renders_state
+test_cmd_corp_no_snapshot_message
+test_cmd_corp_unreachable_message
+test_cmd_corp_stale_and_fetchfail_warns
+test_cmd_corp_json_valid
+test_cmd_corp_tmp_cleanup
+test_cmd_corp_cli_dispatch_and_help
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo

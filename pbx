@@ -1104,6 +1104,179 @@ cmd_snapshot() {
   return 0
 }
 
+# corp_read_state <MIRROR> <каталог> — забрать state-файлы из tip pbx/state.
+# Одноразовый tmp-репо + shallow fetch (только tip, не история снимков) +
+# cat-file blob (без checkout). rc: 0 ок; 2 снимка ещё нет; 3 недоступно/сбой.
+corp_read_state() {
+  local mirror="$1" dest="$2"
+  local ls_out ls_rc=0
+  ls_out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote "$mirror" "refs/heads/$PBX_STATE_BRANCH" 2>/dev/null)" || ls_rc=$?
+  (( ls_rc == 0 )) || return 3
+  [[ -n "$ls_out" ]] || return 2
+  local tmp; tmp="$(mktemp -d -t pbx-corp-read.XXXXXX)" || return 3
+  if ! git init -q "$tmp" 2>/dev/null; then rm -rf "$tmp"; return 3; fi
+  if ! GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$tmp" fetch -q --depth 1 "$mirror" "$PBX_STATE_BRANCH" 2>/dev/null; then
+    rm -rf "$tmp"; return 3
+  fi
+  local f
+  for f in state.json state.env branches.tsv log.tsv; do
+    # отсутствующий в дереве файл (снимок старой схемы) → пустой файл
+    git -C "$tmp" cat-file blob "FETCH_HEAD:$f" > "$dest/$f" 2>/dev/null || : > "$dest/$f"
+  done
+  rm -rf "$tmp"
+  return 0
+}
+
+# corp_render_project <проект> <каталог> — человекочитаемая секция состояния.
+corp_render_project() {
+  local p="$1" d="$2"
+  local gen_at host fetch_ok base_ref base_sha base_subj cur dirty in_merge btotal
+  gen_at="$(sed -n 's/^GENERATED_AT=//p' "$d/state.env")"
+  host="$(sed -n 's/^HOST=//p' "$d/state.env")"
+  fetch_ok="$(sed -n 's/^FETCH_OK=//p' "$d/state.env")"
+  base_ref="$(sed -n 's/^BASE_REF=//p' "$d/state.env")"
+  base_sha="$(sed -n 's/^BASE_SHA=//p' "$d/state.env")"
+  base_subj="$(sed -n 's/^BASE_SUBJECT=//p' "$d/state.env")"
+  cur="$(sed -n 's/^CURRENT_BRANCH=//p' "$d/state.env")"
+  dirty="$(sed -n 's/^DIRTY=//p' "$d/state.env")"
+  in_merge="$(sed -n 's/^IN_MERGE=//p' "$d/state.env")"
+  btotal="$(sed -n 's/^BRANCHES_TOTAL=//p' "$d/state.env")"
+
+  local now=0 age_h=-1 age_str='возраст неизвестен'
+  now="$(date +%s)"
+  if [[ "$gen_at" =~ ^[0-9]+$ ]]; then
+    age_h=$(( (now - gen_at) / 3600 ))
+    if (( age_h < 1 )); then age_str="меньше часа назад"; else age_str="${age_h} ч назад"; fi
+  fi
+  c_blue "— $p: снимок с ${host:--}, $age_str"
+  if (( age_h > 24 )); then
+    c_warn "  ⚠️  снимок протух (>24 ч) — обнови на ноуте: pbx snapshot $p"
+  fi
+  if [[ "$fetch_ok" != true ]]; then
+    c_warn "  ⚠️  ноут снимал без связи с gitlab (fetch_ok=false) — данные могут отставать"
+  fi
+  if [[ -n "$base_ref" ]]; then
+    printf '  %s: %s %s\n' "$base_ref" "${base_sha:0:7}" "$base_subj"
+  else
+    c_warn "  ⚠️  базовая ветка не найдена на origin (снимок без ahead/behind)"
+  fi
+  local merge_note=''
+  if [[ "$in_merge" == true ]]; then merge_note=', НЕЗАВЕРШЁННЫЙ MERGE'; fi
+  printf '  корп-репо: ветка %s, правок %s%s\n' "${cur:--}" "${dirty:-?}" "$merge_note"
+  if [[ -s "$d/branches.tsv" ]]; then
+    printf '  доставленные ветки (%s):\n' "${btotal:-?}"
+    local name where sha7 ahead behind last_date shortstat
+    while IFS=$'\t' read -r name where sha7 ahead behind last_date shortstat || [[ -n "$name" ]]; do
+      [[ -n "$name" ]] || continue
+      printf '    %s %s  +%s/-%s  %s\n' \
+        "$(pad "$name" 34)" "$(pad "$where" 6)" "$ahead" "$behind" "$last_date"
+    done < "$d/branches.tsv"
+  else
+    printf '  доставленных веток нет\n'
+  fi
+  if [[ -s "$d/log.tsv" ]]; then
+    printf '  последние коммиты %s:\n' "${base_ref:-базы}"
+    local i=0 lsha ldate lsubj
+    while IFS=$'\t' read -r lsha ldate lsubj || [[ -n "$lsha" ]]; do
+      [[ -n "$lsha" ]] || continue
+      printf '    %s %s %s\n' "$lsha" "$ldate" "$lsubj"
+      i=$((i+1))
+      if (( i >= 10 )); then break; fi
+    done < "$d/log.tsv"
+  fi
+  return 0
+}
+
+# corp_json <проект>… — JSON-массив состояний; state.json встраивается СЫРЫМ
+# (мы его и сгенерировали — парс не нужен).
+corp_json() {
+  local p first=1 d rc reason
+  printf '['
+  for p in "$@"; do
+    load_config "$p"
+    if (( first )); then first=0; else printf ','; fi
+    if [[ -z "${MIRROR:-}" ]]; then
+      printf '\n  {"project":"%s","available":false,"reason":"no-mirror"}' "$(_json_str_v2 "$p")"
+      continue
+    fi
+    d="$(mktemp -d -t pbx-corp-read.XXXXXX)"
+    rc=0
+    corp_read_state "$MIRROR" "$d" || rc=$?
+    if (( rc == 0 )) && [[ -s "$d/state.json" ]]; then
+      printf '\n  {"project":"%s","available":true,"state":' "$(_json_str_v2 "$p")"
+      cat "$d/state.json"
+      printf '}'
+    else
+      case "$rc" in
+        2) reason="no-snapshot" ;;
+        3) reason="mirror-unreachable" ;;
+        *) reason="empty-state" ;;
+      esac
+      printf '\n  {"project":"%s","available":false,"reason":"%s"}' "$(_json_str_v2 "$p")" "$reason"
+    fi
+    rm -rf "$d"
+  done
+  printf '\n]\n'
+  return 0
+}
+
+cmd_corp() {
+  local project='' json=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "Неизвестный флаг: $a (ожидается --json)" ;;
+      *) [[ -n "$project" ]] && die "Лишний аргумент: $a (проект указывается один)"; project="$a" ;;
+    esac
+  done
+  if [[ -n "$project" ]]; then
+    PBX_CURRENT_PROJECT="$project"
+    valid_project "$project"
+    if (( ! json )); then
+      load_config "$project"
+      [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project'. Добавь MIRROR=git@github.com:<user>/<repo>.git в $PBX_REGISTRY_DIR/$project.conf"
+    fi
+  fi
+
+  local -a names=()
+  if [[ -n "$project" ]]; then
+    names=("$project")
+  else
+    local p
+    while IFS= read -r p; do
+      load_config "$p"
+      [[ -n "${MIRROR:-}" ]] && names+=("$p")
+    done < <(list_projects)
+  fi
+
+  if (( json )); then
+    corp_json ${names[@]+"${names[@]}"}
+    return 0
+  fi
+
+  ui_section "Корп-состояние" "🔵 Корп-состояние проектов:"
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов с MIRROR не найдено — задай MIRROR= в реестре)"
+    return 0
+  fi
+  local rc d
+  local pr
+  for pr in "${names[@]}"; do
+    load_config "$pr"
+    d="$(mktemp -d -t pbx-corp-read.XXXXXX)"
+    rc=0
+    corp_read_state "$MIRROR" "$d" || rc=$?
+    case "$rc" in
+      0) corp_render_project "$pr" "$d" ;;
+      2) c_warn "  $pr: снимка ещё нет — запусти на ноуте: pbx snapshot $pr" ;;
+      *) c_warn "  $pr: зеркало недоступно ($MIRROR) — VPN/PAT/URL?" ;;
+    esac
+    rm -rf "$d"
+  done
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
@@ -1456,6 +1629,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
+  pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
@@ -1503,6 +1677,7 @@ ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
   ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → ветка pbx/state зеркала${C_RESET}
+  ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
   ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
@@ -1821,6 +1996,7 @@ main() {
     pack)               require_wsl; cmd_pack "$@" ;;
     push)               require_wsl; cmd_push "$@" ;;
     snapshot)           cmd_snapshot "$@" ;;
+    corp)               cmd_corp "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
