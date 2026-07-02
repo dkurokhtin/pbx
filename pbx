@@ -699,6 +699,27 @@ ui_summary() {
   printf ' %s%s%s сообщение  %s\n' "$C_GREY" "$G_END" "$C_RESET" "$3"
 }
 
+# ---- интерактивное меню -------------------------------------------------------
+# menu_select_plain <заголовок> <пункт...> — нумерованный fallback без raw-режима.
+# Список/промпт в stderr; индекс (0-based) в stdout; rc: 0 выбор, 130 отмена/EOF.
+menu_select_plain() {
+  local title="$1"; shift
+  local -a opts=("$@")
+  local n=${#opts[@]} i choice
+  printf '%s\n' "$title" >&2
+  for i in "${!opts[@]}"; do printf '  %d) %s\n' "$((i+1))" "${opts[i]}" >&2; done
+  while :; do
+    printf 'Выбор [1-%d, q — отмена]: ' "$n" >&2
+    IFS= read -r choice || return 130
+    choice="$(strip_cr "$choice")"
+    [[ "$choice" == q ]] && return 130
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+      printf '%s\n' "$((choice-1))"
+      return 0
+    fi
+  done
+}
+
 # ---- диспетчер -------------------------------------------------------------
 main() {
   local cmd="${1:-help}"; shift || true

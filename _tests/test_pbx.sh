@@ -351,6 +351,30 @@ test_help_plain_invariant() {
   assert_no  "help plain: без ANSI"     "$out" $'\033'
 }
 
+# --- меню: plain-fallback ------------------------------------------------------
+test_menu_select_plain_choice() {
+  local out rc=0
+  out="$(printf '2\n' | { source "$PBX"; menu_select_plain "t" alpha beta gamma; })" || rc=$?
+  assert_eq "plain-меню: выбор 2 → индекс 1" "$out" "1"
+  assert_eq "plain-меню: rc=0" "$rc" "0"
+}
+test_menu_select_plain_cancel() {
+  local out rc=0
+  out="$(printf 'q\n' | { source "$PBX"; menu_select_plain "t" a b; })" || rc=$?
+  assert_eq "plain-меню: q → отмена rc=130" "$rc" "130"
+  assert_eq "plain-меню: stdout пуст при отмене" "$out" ""
+}
+test_menu_select_plain_eof() {
+  local rc=0
+  ( source "$PBX"; menu_select_plain "t" a b </dev/null >/dev/null 2>&1 ) || rc=$?
+  assert_eq "plain-меню: EOF → 130 (не виснет)" "$rc" "130"
+}
+test_menu_select_plain_invalid_then_valid() {
+  local out
+  out="$(printf 'x\n9\n1\n' | { source "$PBX"; menu_select_plain "t" a b; } 2>/dev/null)"
+  assert_eq "plain-меню: мусор/вне диапазона переспрашивается" "$out" "0"
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -792,6 +816,10 @@ test_list_projects
 test_list_union
 test_list_pipe_bare_names
 test_help_plain_invariant
+test_menu_select_plain_choice
+test_menu_select_plain_cancel
+test_menu_select_plain_eof
+test_menu_select_plain_invalid_then_valid
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
