@@ -804,9 +804,103 @@ menu_select() {
   done
 }
 
+# ---- экраны меню ----------------------------------------------------------------
+menu_pause() {
+  printf '%s' "Enter — в меню " >&2
+  IFS= read -r _ || true
+  return 0
+}
+
+# menu_project_flow <pack|deliver|log>: выбор проекта → параметры → вызов cmd_*.
+# rc=0 — команда выполнена, выйти из меню; rc=1 — вернуться в меню.
+menu_project_flow() {
+  local action="$1" idx project branch msg
+  local -a projects=()
+  mapfile -t projects < <(list_projects)
+  if (( ${#projects[@]} == 0 )); then
+    c_warn "(проектов не найдено — заведи: pbx add / pbx scan)"
+    return 1
+  fi
+  idx="$(menu_select "Проект:" "${projects[@]}")" || return 1
+  project="${projects[idx]}"
+  case "$action" in
+    pack)
+      cmd_pack "$project"
+      return 0
+      ;;
+    log)
+      cmd_log "$project"
+      menu_pause
+      return 1
+      ;;
+    deliver)
+      if [[ -t 0 ]]; then
+        read -e -r -i "feature/" -p "Ветка: " branch || return 1
+      else
+        printf 'Ветка: ' >&2
+        IFS= read -r branch || return 1
+      fi
+      branch="$(strip_cr "$branch")"
+      if [[ -z "$branch" || "$branch" == "feature/" ]]; then
+        c_warn "(ветка не задана — отмена)"
+        return 1
+      fi
+      printf 'Сообщение коммита: ' >&2
+      IFS= read -r msg || return 1
+      msg="$(strip_cr "$msg")"
+      if [[ -z "$msg" ]]; then
+        c_warn "(сообщение пустое — отмена)"
+        return 1
+      fi
+      ui_dim "→ pbx deliver $project $branch \"$msg\""
+      cmd_deliver "$project" "$branch" "$msg"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+cmd_menu() {
+  require_wsl
+  trap 'ui_raw_off' EXIT          # страховка: терминал не остаётся в raw при любом выходе
+  local idx
+  local -a items=(
+    'pack    — упаковать проект в архив'
+    'deliver — доставить архив в репо (ветка + MR)'
+    'log     — диагностика проекта'
+    'list    — список проектов'
+    'scan    — заполнить реестр (подсказка)'
+    'add     — добавить проект (подсказка)'
+    'help    — справка'
+    'выход'
+  )
+  while :; do
+    idx="$(menu_select "pbx — что делаем?" "${items[@]}")" || { printf '\n' >&2; return 0; }
+    case "$idx" in
+      0) if menu_project_flow pack;    then return 0; fi ;;
+      1) if menu_project_flow deliver; then return 0; fi ;;
+      2) menu_project_flow log || true ;;
+      3) cmd_list; menu_pause ;;
+      4) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      5) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      6) cmd_help; menu_pause ;;
+      7) return 0 ;;
+    esac
+  done
+}
+
 # ---- диспетчер -------------------------------------------------------------
 main() {
-  local cmd="${1:-help}"; shift || true
+  if (( $# == 0 )); then
+    if (( UI_TTY )) && [[ -z "${PBX_NO_MENU:-}" ]] \
+       && [[ -n "${TERM:-}" && "${TERM:-}" != dumb && "${TERM:-}" != unknown ]]; then
+      cmd_menu
+    else
+      cmd_help
+    fi
+    return 0
+  fi
+  local cmd="$1"; shift || true
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;

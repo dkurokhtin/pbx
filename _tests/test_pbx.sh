@@ -383,6 +383,44 @@ test_menu_select_falls_back_to_plain() {
   assert_eq "menu_select: fallback в plain, выбор 1 → 0" "$out" "0"
   assert_eq "menu_select: rc=0" "$rc" "0"
 }
+
+# --- меню: гейт и e2e -----------------------------------------------------------
+test_menu_gate_nontty_help() {
+  local out rc=0
+  out="$(bash "$PBX" </dev/null 2>&1)" || rc=$?
+  assert_eq "гейт: non-TTY голый pbx → rc=0"  "$rc" "0"
+  assert_has "гейт: non-TTY голый pbx → help" "$out" "pbx — доставка проектов Pybotx"
+}
+test_menu_gate_no_menu_env() {
+  local out   # TERM=xterm: гейт не должен отпасть по TERM — проверяем именно PBX_NO_MENU
+  out="$(printf '' | { source "$PBX"; UI_TTY=1; TERM=xterm PBX_NO_MENU=1 main; } 2>&1)"
+  assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
+}
+test_menu_exit_item() {
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (8) завершает без действий
+  local rc=0
+  ( printf '8\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» → rc=0" "$rc" "0"
+}
+test_menu_pack_e2e() {
+  local ws; ws="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  # 1 = pack; затем 1 = первый проект; plain-фолбэк меню читает пайп
+  ( printf '1\n1\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; DIST_DIR="$ws/_dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) >/dev/null 2>&1 || true
+  assert_has "меню e2e: pack создал архив" "$(ls "$ws/_dist" 2>/dev/null)" "proj.tar.gz"
+  rm -rf "$ws" "$reg"
+}
+test_menu_cancel_returns_cleanly() {
+  local rc=0
+  ( printf 'q\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: отмена на первом экране → rc=0" "$rc" "0"
+}
+
 test_ui_raw_off_idempotent() {
   local out
   out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; ui_raw_off; ui_raw_off; echo REACHED' 2>/dev/null)"
@@ -835,6 +873,11 @@ test_menu_select_plain_cancel
 test_menu_select_plain_eof
 test_menu_select_plain_invalid_then_valid
 test_menu_select_falls_back_to_plain
+test_menu_gate_nontty_help
+test_menu_gate_no_menu_env
+test_menu_exit_item
+test_menu_pack_e2e
+test_menu_cancel_returns_cleanly
 test_ui_raw_off_idempotent
 test_pack_excludes
 test_pack_excludes_empty
