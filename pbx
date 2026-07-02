@@ -8,6 +8,7 @@
 #  Команды:
 #    pbx pack    <проект>
 #    pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
+#    pbx log     [проект]
 #    pbx list
 #    pbx help
 #
@@ -37,7 +38,19 @@ c_blue()  { printf '\033[34m%s\033[0m\n' "$*"; }
 c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
 c_red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 c_warn()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
-die()     { c_red "❌ $*"; exit 1; }
+die() {
+  c_red "❌ $*"
+  # Авто-захват диагностики для ИИ-агента: только если известен проект
+  # (ранние die на аргументах — до резолва — просто выходят).
+  if [[ -n "${PBX_CURRENT_PROJECT:-}" && -z "${PBX_IN_DIE:-}" ]]; then
+    export PBX_IN_DIE=1
+    local lf="$DIST_DIR/pbx-$PBX_CURRENT_PROJECT.log"
+    mkdir -p "$DIST_DIR" 2>/dev/null || true
+    { printf '\n=== [ОШИБКА] %s ===\n' "$*"; collect_diag "$PBX_CURRENT_PROJECT"; } >> "$lf" 2>&1 || true
+    c_red "🧭 Диагностика для агента: $lf"
+  fi
+  exit 1
+}
 
 # ---- утилиты ---------------------------------------------------------------
 strip_cr() { printf '%s' "${1//$'\r'/}"; }   # защита от CRLF/копипаста
@@ -215,6 +228,7 @@ sync_exclude_args() {
 # .claude и CLAUDE.md (контекст агента — НЕ коммитим), кэши питона.
 cmd_pack() {
   local project; project="$(strip_cr "${1:?Использование: pbx pack <проект>}")"
+  PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
   valid_project "$project"
   load_config "$project"
   [[ -d "$SRC" ]] || die "Нет исходников: $SRC"
@@ -282,6 +296,7 @@ cmd_deliver() {
   fi
 
   load_config "$project"
+  PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
   local repo="$REPO"
 
   [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
@@ -361,6 +376,79 @@ cmd_deliver() {
   esac
 }
 
+# ---- log: диагностика для ИИ-агента ----------------------------------------
+# collect_diag печатает структурированный отчёт в stdout. Чистая: не делает die
+# и не роняет скрипт (тело в подшелле с ослабленными set -e/pipefail).
+collect_diag() {
+  local project; project="$(strip_cr "${1:-}")"
+  (
+    set +e +o pipefail
+    printf '=== pbx diag'; [[ -n "$project" ]] && printf ' [%s]' "$project"
+    printf ' @ %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # [pbx] — путь и версия самого инструмента (резолвим симлинк /usr/local/bin/pbx)
+    local self real dir commit
+    self="${BASH_SOURCE[0]}"
+    real="$(readlink -f "$self" 2>/dev/null || echo "$self")"
+    dir="$(cd "$(dirname "$real")" 2>/dev/null && pwd)"
+    commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo '—')"
+    [[ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]] && commit="$commit+dirty"
+    printf '[pbx]     script=%s commit=%s\n' "$real" "$commit"
+
+    # [env] — WSL, версии инструментов, ключевые пути, PBX_* env
+    local wsl=no; grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && wsl=yes
+    printf '[env]     wsl=%s git=%s rsync=%s tar=%s gh=%s unzip=%s\n' \
+      "$wsl" \
+      "$(git --version 2>/dev/null | awk '{print $3}')" \
+      "$(rsync --version 2>/dev/null | awk 'NR==1{print $3}')" \
+      "$(tar --version 2>/dev/null | awk 'NR==1{print $NF}')" \
+      "$(command -v gh >/dev/null && gh --version 2>/dev/null | awk 'NR==1{print $3}' || echo '—')" \
+      "$(command -v unzip >/dev/null && echo yes || echo '—')"
+    printf '[env]     WORKSPACE=%s PROJECTS_ROOT=%s DIST_DIR=%s REGISTRY=%s\n' \
+      "$WORKSPACE" "$PROJECTS_ROOT" "$DIST_DIR" "$PBX_REGISTRY_DIR"
+    local pbxenv; pbxenv="$(env | grep -E '^PBX_' | sort | paste -sd' ' -)"
+    printf '[env]     PBX_*: %s\n' "${pbxenv:-—}"
+
+    if [[ -n "$project" ]]; then
+      load_config "$project"
+      printf '[config]  project=%s SRC=%s REPO=%s BASE=%s TARGET=%s FORGE=%s\n' \
+        "$project" "$SRC" "$REPO" "$BASE_BRANCH" "$TARGET_BRANCH" "$FORGE"
+      printf '[config]  PACK_EXCL=(%s) SYNC_EXCL=(%s)\n' \
+        "${EXTRA_PACK_EXCLUDES[*]:-}" "${EXTRA_SYNC_EXCLUDES[*]:-}"
+
+      if [[ -d "$REPO/.git" ]]; then
+        printf '[repo]    branch=%s remote=%s\n' \
+          "$(git -C "$REPO" branch --show-current 2>/dev/null || echo '—')" \
+          "$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '—')"
+        printf '[repo]    status:\n';       git -C "$REPO" status -s   2>/dev/null | head -30 | sed 's/^/          /'
+        printf '[repo]    last commits:\n'; git -C "$REPO" log --oneline -5 2>/dev/null | sed 's/^/          /'
+      else
+        printf '[repo]    REPO не git: %s\n' "$REPO"
+      fi
+
+      local arch="$DIST_DIR/$project.tar.gz"
+      if [[ -f "$arch" ]]; then
+        printf '[archive] %s size=%s mtime=%s files=%s\n' "$arch" \
+          "$(du -h "$arch" 2>/dev/null | awk '{print $1}')" \
+          "$(date -r "$arch" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')" \
+          "$(tar -tzf "$arch" 2>/dev/null | wc -l | tr -d ' ')"
+      else
+        printf '[archive] нет архива: %s\n' "$arch"
+      fi
+    fi
+    true
+  )
+}
+
+# Собрать диагностику и вывести в stdout + дописать в $DIST_DIR/pbx-<проект>.log.
+cmd_log() {
+  local project; project="$(strip_cr "${1:-}")"
+  mkdir -p "$DIST_DIR"
+  local lf
+  if [[ -n "$project" ]]; then lf="$DIST_DIR/pbx-$project.log"; else lf="$DIST_DIR/pbx.log"; fi
+  { collect_diag "$project"; } | tee -a "$lf"
+  c_blue "🧭 Диагностика записана: $lf"
+}
 
 # ---- add -------------------------------------------------------------------
 # Завести проект в реестр: $PBX_REGISTRY_DIR/<имя>.conf с SRC.
@@ -442,6 +530,8 @@ pbx — доставка проектов Pybotx (WSL)
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
+  pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
+                                                (config/repo/archive/env; pbx также сам пишет её в этот файл при любой ошибке)
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
@@ -452,6 +542,7 @@ pbx — доставка проектов Pybotx (WSL)
 Примеры:
   pbx pack <проект>
   pbx deliver <проект> feature/SUBA-2147-fix-name "Описание изменений"
+  pbx log <проект>            # собрать диагностику после ошибки
   pbx add sup /home/me/sup
 
 Переопределяемые переменные окружения:
@@ -483,6 +574,7 @@ main() {
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
+    log)                cmd_log "$@" ;;
     list|ls)            cmd_list ;;
     help|-h|--help)     cmd_help ;;
     *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;

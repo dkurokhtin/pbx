@@ -413,6 +413,61 @@ test_deliver_guard_blocks_deletions() {
   rm -rf "$base" "$reg"
 }
 
+# --- log: диагностика для ИИ-агента -----------------------------------------
+test_log_reports_project() {
+  local base; base="$(make_ws)"
+  local repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+
+  git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin git@h:/proj.git \
+    && git checkout -q -b dev && echo x > a.txt && git add -A && git commit -q -m init ) >/dev/null 2>&1
+  mkdir -p "$src"; echo y > "$src/a.txt"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
+
+  local out; out="$(cmd_log proj 2>&1)"
+  assert_has "log: секция [config]"      "$out" "[config]"
+  assert_has "log: REPO в выводе"        "$out" "$repo"
+  assert_has "log: ветка репо"           "$out" "branch=dev"
+  assert_has "log: секция [archive]"     "$out" "[archive]"
+  assert_has "log: имя архива"           "$out" "proj.tar.gz"
+  assert_has "log: секция [env]"         "$out" "[env]"
+  assert_has "log: файл pbx-proj.log"    "$(ls "$dist")" "pbx-proj.log"
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
+test_log_no_project() {
+  local base; base="$(make_ws)"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  local out; out="$(cmd_log 2>&1)"
+  assert_has "log без проекта: [env]"    "$out" "[env]"
+  assert_no  "log без проекта: нет [config]" "$out" "[config]"
+  assert_has "log без проекта: файл pbx.log" "$(ls "$dist")" "pbx.log"
+  cd "$HERE"; rm -rf "$base"
+}
+
+test_die_writes_diag() {
+  local base; base="$(make_ws)"
+  local repo="$base/repo"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE
+
+  git init -q "$repo" >/dev/null 2>&1
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$base/src" "$repo" > "$reg/proj.conf"
+  # архив НЕ создаём → deliver резолвит проект, выставит PBX_CURRENT_PROJECT, потом die "Архив не найден"
+  local rc=0
+  ( cmd_deliver "proj" "feature/T-9" "msg" "$dist/proj.tar.gz" --yes </dev/null >/dev/null 2>&1 ) || rc=$?
+  assert_eq  "die: команда упала (rc=1)"  "$rc" "1"
+  assert_has "die: лог-файл создан"       "$(ls "$dist" 2>/dev/null)" "pbx-proj.log"
+  assert_has "die: причина ОШИБКА в логе" "$(cat "$dist/pbx-proj.log" 2>/dev/null)" "ОШИБКА"
+  assert_has "die: [config] в логе"       "$(cat "$dist/pbx-proj.log" 2>/dev/null)" "[config]"
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
 # --- Task 5: forge_push -----------------------------------------------------
 test_forge_gitlab() {
   CALLS="$(mktemp)"; FORGE="gitlab"; TARGET_BRANCH="master"
@@ -607,6 +662,9 @@ test_pack_e2e
 test_pack_e2e_registry
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
+test_log_reports_project
+test_log_no_project
+test_die_writes_diag
 test_add_creates_entry
 test_add_refuses_overwrite
 test_valid_project_registry_elsewhere
