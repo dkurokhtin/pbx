@@ -688,6 +688,13 @@ collect_diag() {
         printf '[repo]    branch=%s remote=%s\n' \
           "$(git -C "$REPO" branch --show-current 2>/dev/null || echo '—')" \
           "$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '—')"
+        local up ab ahead='—' behind='—'
+        up="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '—')"
+        if [[ "$up" != '—' ]]; then
+          ab="$(git -C "$REPO" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || true)"
+          if [[ -n "$ab" ]]; then behind="${ab%%$'\t'*}"; ahead="${ab##*$'\t'}"; fi
+        fi
+        printf '[repo]    upstream=%s ahead=%s behind=%s\n' "$up" "$ahead" "$behind"
         local st; st="$(git -C "$REPO" status -s 2>/dev/null | head -30)"
         printf '[repo]    status:\n'
         if [[ -n "$st" ]]; then printf '%s\n' "$st" | sed 's/^/          /'; else printf '          (clean)\n'; fi
@@ -702,6 +709,13 @@ collect_diag() {
           "$(du -h "$arch" 2>/dev/null | awk '{print $1}')" \
           "$(date -r "$arch" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')" \
           "$(tar -tzf "$arch" 2>/dev/null | wc -l | tr -d ' ')"
+        local metaf="$DIST_DIR/$project.meta"
+        if [[ -f "$metaf" ]]; then
+          printf '[archive] meta: commit=%s branch=%s packed_at=%s\n' \
+            "$(sed -n 's/^COMMIT=//p' "$metaf")" \
+            "$(sed -n 's/^BRANCH=//p' "$metaf")" \
+            "$(date -d "@$(sed -n 's/^PACKED_AT=//p' "$metaf")" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
+        fi
       else
         printf '[archive] нет архива: %s\n' "$arch"
       fi
@@ -755,7 +769,7 @@ EOF
 # ---- scan ------------------------------------------------------------------
 # Найти репозитории в каталоге и создать записи реестра (REPO или SRC).
 cmd_scan() {
-  local field="" dir="" dry=0 a dirset=0
+  local field="" dir="" dry=0 a dirset=0 br
   for a in "$@"; do
     a="$(strip_cr "$a")"
     case "$a" in
@@ -788,10 +802,22 @@ cmd_scan() {
     forge=""
     [[ "$url" == *"@github.com:"* || "$url" == *"//github.com/"* ]] && forge=$'\nFORGE=github'
     if [[ "$dry" -eq 1 ]]; then
-      c_green "  + $name → $field=$path (dry-run)"
+      if (( UI_COLOR_OUT )); then
+        br="$(git -C "$path" branch --show-current 2>/dev/null || true)"
+        printf '\033[32m  + %s → %s=%s (dry-run)\033[0m%s\n' "$name" "$field" "$path" \
+          "${br:+ ${C_DIM}[$br]${C_RESET}}"
+      else
+        c_green "  + $name → $field=$path (dry-run)"
+      fi
     else
       printf '# Реестр pbx (scan): проект %s\n%s=%s%s\n' "$name" "$field" "$path" "$forge" > "$f"
-      c_green "  + $name → $field=$path"
+      if (( UI_COLOR_OUT )); then
+        br="$(git -C "$path" branch --show-current 2>/dev/null || true)"
+        printf '\033[32m  + %s → %s=%s\033[0m%s\n' "$name" "$field" "$path" \
+          "${br:+ ${C_DIM}[$br]${C_RESET}}"
+      else
+        c_green "  + $name → $field=$path"
+      fi
     fi
     created=$((created+1))
   done < <(scan_candidates "$dir")

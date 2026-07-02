@@ -730,6 +730,42 @@ test_pad_helpers_multibyte() {
   assert_eq "padr: правое выравнивание" "$out" "  5|"
 }
 
+# --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
+test_scan_plain_no_branch_tail() {
+  local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mk_repo "$ws/proj" "git@h:/proj.git"
+  local out; out="$(cmd_scan --repo "$ws" 2>&1)"
+  assert_has "scan plain: строка кандидата прежняя" "$out" "+ proj → REPO=$ws/proj"
+  assert_no  "scan plain: без хвоста ветки"          "$out" "["
+  rm -rf "$ws" "$reg"
+}
+
+test_log_upstream_and_meta_lines() {
+  local base; base="$(make_ws)"
+  local repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  git init -q --bare "$base/remote.git"
+  git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$base/remote.git" \
+    && git checkout -q -b dev && echo x > a.txt && git add -A && git commit -qm init \
+    && git push -qu origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo y > "$src/a.txt"
+  # мета: как пишет pack
+  printf 'PBX_META_VERSION=1\nPACKED_AT=1700000000\nCOMMIT=abc1234\nBRANCH=dev\nDIRTY_AT_PACK=0\n' \
+    > "$dist/proj.meta"
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
+
+  local out; out="$(cmd_log proj 2>&1)"
+  assert_has "log: строка upstream"      "$out" "upstream=origin/dev"
+  assert_has "log: ahead/behind"         "$out" "ahead=0 behind=0"
+  assert_has "log: meta-строка"          "$out" "meta: commit=abc1234 branch=dev"
+  assert_has "log: старые строки целы"   "$out" "[config]"
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -1131,6 +1167,8 @@ test_status_json_sentinels_nongit
 test_status_table_pipe_no_ansi
 test_status_unknown_project_dies
 test_pad_helpers_multibyte
+test_scan_plain_no_branch_tail
+test_log_upstream_and_meta_lines
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
