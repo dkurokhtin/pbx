@@ -997,6 +997,87 @@ test_cmd_push_default_branch_is_src_branch() {
   rm -rf "$PU_BASE" "$ws" "$reg"
 }
 
+# --- Э3: meta_update — мерж ключей в .meta ------------------------------------
+test_meta_update_creates_with_header() {
+  local d; d="$(make_ws)"
+  meta_update "$d/proj.meta" "FOO=bar" "BAZ=1"
+  assert_has "meta_update: шапка создана"  "$(head -1 "$d/proj.meta")" "# pbx meta: проект proj"
+  assert_eq  "meta_update: FOO записан"    "$(sed -n 's/^FOO=//p' "$d/proj.meta")" "bar"
+  assert_eq  "meta_update: BAZ записан"    "$(sed -n 's/^BAZ=//p' "$d/proj.meta")" "1"
+  rm -rf "$d"
+}
+
+test_meta_update_merge_preserves_order() {
+  local d; d="$(make_ws)"
+  printf '# шапка\nA=1\nB=2\n' > "$d/proj.meta"
+  meta_update "$d/proj.meta" "B=22" "C=3"
+  assert_eq "meta_update: обновление на месте, новое в конец, шапка цела" \
+    "$(cat "$d/proj.meta")" "$(printf '# шапка\nA=1\nB=22\nC=3')"
+  rm -rf "$d"
+}
+
+test_meta_update_value_with_equals() {
+  local d; d="$(make_ws)"
+  meta_update "$d/proj.meta" "BRANCH=feature/X-со=знаком"
+  assert_eq "meta_update: значение с '=' внутри" \
+    "$(sed -n 's/^BRANCH=//p' "$d/proj.meta")" "feature/X-со=знаком"
+  rm -rf "$d"
+}
+
+test_meta_update_bad_keys_skipped() {
+  local d; d="$(make_ws)"
+  printf '# шапка\nA=1\n' > "$d/proj.meta"
+  local before; before="$(cat "$d/proj.meta")"
+  meta_update "$d/proj.meta" "no-equals" "плохой ключ=x" 2>/dev/null
+  assert_eq "meta_update: кривые аргументы не трогают файл" "$(cat "$d/proj.meta")" "$before"
+  rm -rf "$d"
+}
+
+test_meta_update_crlf_normalized() {
+  local d; d="$(make_ws)"
+  printf '# шапка\r\nA=1\r\n' > "$d/proj.meta"
+  meta_update "$d/proj.meta" "A=2"
+  assert_eq "meta_update: CRLF-файл — ключ не задвоен" "$(grep -c '^A=' "$d/proj.meta")" "1"
+  assert_eq "meta_update: CRLF-файл — значение обновлено" "$(sed -n 's/^A=//p' "$d/proj.meta")" "2"
+  rm -rf "$d"
+}
+
+test_pack_meta_survives_push_keys() {
+  # pack → push-мета → pack: push-ключи выживают, pack-ключи одиночны
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  cmd_pack proj >/dev/null 2>&1
+  meta_update "$DIST_DIR/proj.meta" "PUSHED_AT=123" "PUSH_BRANCH=feature/X" \
+    "PUSH_COMMIT=abc" "PUSH_SOURCE_COMMIT=def"
+  cmd_pack proj >/dev/null 2>&1
+  assert_has "meta: PUSH_BRANCH выжил после pack" \
+    "$(cat "$DIST_DIR/proj.meta")" "PUSH_BRANCH=feature/X"
+  assert_eq "meta: COMMIT одиночен"    "$(grep -c '^COMMIT=' "$DIST_DIR/proj.meta")" "1"
+  assert_eq "meta: PACKED_AT одиночен" "$(grep -c '^PACKED_AT=' "$DIST_DIR/proj.meta")" "1"
+  rm -rf "$ws" "$reg"
+}
+
+test_cmd_push_writes_push_meta() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/M-1 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  local meta="$DIST_DIR/proj.meta"
+  assert_eq "push-мета: PUSH_BRANCH" "$(sed -n 's/^PUSH_BRANCH=//p' "$meta")" "feature/M-1"
+  local head; head="$(git -C "$PU_SRC" rev-parse HEAD)"
+  assert_eq "push-мета: PUSH_SOURCE_COMMIT = HEAD SRC" \
+    "$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$meta")" "$head"
+  if _pbx_is_sha "$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"; then
+    ok "push-мета: PUSH_COMMIT — полный SHA"
+  else
+    bad "push-мета: PUSH_COMMIT не SHA"
+  fi
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -1516,6 +1597,13 @@ test_push_snapshot_no_changes
 test_push_snapshot_concurrent_commit_survives
 test_cmd_push_requires_mirror
 test_cmd_push_default_branch_is_src_branch
+test_meta_update_creates_with_header
+test_meta_update_merge_preserves_order
+test_meta_update_value_with_equals
+test_meta_update_bad_keys_skipped
+test_meta_update_crlf_normalized
+test_pack_meta_survives_push_keys
+test_cmd_push_writes_push_meta
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo

@@ -244,6 +244,69 @@ sync_exclude_args() {
 # DIST_DIR/<проект>.meta, bash-формат KEY=value (jq нет). Пишется атомарно
 # (.tmp → mv), best-effort: сбой записи меты НЕ роняет pack — архив важнее.
 # Читатели: pbx status (дрейф по коммитам), pbx log, этапы Э2/Э3.
+
+# meta_update <файл> KEY=VALUE… — мерж ключей в meta-файл (KEY=value, sed-читатели).
+# Существующие ключи обновляются НА МЕСТЕ (порядок строк и #-шапка сохраняются),
+# новые дописываются в конец. Атомарно (tmp+mv), best-effort: сбой → warn, rc=0.
+# CRLF чистится и в аргументах, и в строках файла (мета с /mnt/c часто с \r —
+# без чистки ключ «COMMIT\r» задваивается; воспроизведено). \n в значении →
+# пробел; ключи только [A-Za-z0-9_]+ (кривой — warn и пропуск, файл не трогаем).
+meta_update() {
+  local file="$1"; shift
+  local proj; proj="$(basename "$file" .meta)"
+  local -a keys=()
+  local -A vals=()
+  local kv key val
+  for kv in "$@"; do
+    kv="$(strip_cr "$kv")"
+    kv="${kv//$'\n'/ }"
+    case "$kv" in
+      *=*) ;;
+      *) c_warn "⚠️  meta_update: пропущен аргумент без '=': '$kv'"; continue ;;
+    esac
+    key="${kv%%=*}"; val="${kv#*=}"
+    case "$key" in
+      ''|*[!A-Za-z0-9_]*) c_warn "⚠️  meta_update: плохой ключ '$key' — пропущен"; continue ;;
+    esac
+    [[ -v vals[$key] ]] || keys+=("$key")
+    vals[$key]="$val"
+  done
+  (( ${#keys[@]} )) || { c_warn "⚠️  meta_update: нет валидных пар KEY=VALUE для $file"; return 0; }
+
+  local -a out=()
+  local -A written=()
+  local line lk
+  if [[ -f "$file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|'#'*) out+=("$line"); continue ;;
+      esac
+      lk="${line%%=*}"
+      if [[ -v vals[$lk] ]]; then
+        out+=("$lk=${vals[$lk]}"); written[$lk]=1
+      else
+        out+=("$line")
+      fi
+    done < "$file"
+  else
+    out+=("# pbx meta: проект $proj, автогенерация pbx")
+  fi
+  for key in "${keys[@]}"; do
+    [[ -v written[$key] ]] && continue
+    out+=("$key=${vals[$key]}")
+  done
+  local tmp="$file.tmp"
+  # Редиректы обрабатываются слева направо: ошибку открытия $tmp глушит ТОЛЬКО
+  # группа { …; } 2>/dev/null (иначе она просочится раньше подавления).
+  if { printf '%s\n' "${out[@]}" > "$tmp"; } 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  c_warn "⚠️  Не удалось записать мету: $file"
+  return 0
+}
+
 write_pack_meta() {
   local project="$1" src="$2" out_meta="$3"
   local commit='-' branch='-' dirty='-'
@@ -256,15 +319,12 @@ write_pack_meta() {
       dirty="$(printf '%s' "$st_out" | grep -c . || true)"
     fi
   fi
-  {
-    printf '# pbx meta: проект %s, автогенерация pack\n' "$project"
-    printf 'PBX_META_VERSION=1\n'
-    printf 'PACKED_AT=%s\n' "$(date +%s)"
-    printf 'COMMIT=%s\n' "$commit"
-    printf 'BRANCH=%s\n' "$branch"
-    printf 'DIRTY_AT_PACK=%s\n' "$dirty"
-  } > "$out_meta.tmp" 2>/dev/null && mv "$out_meta.tmp" "$out_meta" 2>/dev/null \
-    || c_warn "⚠️  Не удалось записать мету: $out_meta"
+  meta_update "$out_meta" \
+    "PBX_META_VERSION=1" \
+    "PACKED_AT=$(date +%s)" \
+    "COMMIT=$commit" \
+    "BRANCH=$branch" \
+    "DIRTY_AT_PACK=$dirty"
   return 0
 }
 
@@ -690,6 +750,13 @@ cmd_push() {
   if [[ -z "$sha" ]]; then
     return 0   # «изменений нет» — push_snapshot уже сообщил
   fi
+  mkdir -p "$DIST_DIR" 2>/dev/null || true
+  local src_head; src_head="$(git -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null || echo '-')"
+  meta_update "$DIST_DIR/$project.meta" \
+    "PUSHED_AT=$(date +%s)" \
+    "PUSH_BRANCH=$branch" \
+    "PUSH_COMMIT=$sha" \
+    "PUSH_SOURCE_COMMIT=$src_head"
   c_green "✅ $project: снапшот рабочего дерева ушёл в зеркало веткой '$branch' (${sha:0:7})"
   ui_summary "$branch" "$MIRROR" "снапшот ${sha:0:7} (вкл. незакоммиченное)"
   return 0
