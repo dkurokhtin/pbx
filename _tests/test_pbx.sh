@@ -67,6 +67,35 @@ test_c_funcs_respect_flags() {
   assert_has "UI_COLOR_ERR=1 → c_warn с ANSI"  "$out" $'\033[33m'
 }
 
+# --- UI: хелперы и plain-инвариант pack ---------------------------------------
+test_ui_helpers_plain_silent() {
+  # в plain-режиме TTY-only хелперы молчат и не роняют set -e
+  local out
+  out="$(bash -c 'set -euo pipefail; source "'"$PBX"'"; ui_kv SRC /x; ui_dim hint; ui_summary b t m; echo REACHED')"
+  assert_eq "plain: ui_kv/ui_dim/ui_summary молчат, set -e жив" "$out" "REACHED"
+}
+
+test_ui_section_plain_invariant() {
+  local out
+  out="$(bash -c 'source "'"$PBX"'"; ui_section "Заголовок TTY" "🔵 Полная plain-строка"')"
+  assert_eq "plain: ui_section печатает вторую форму" "$out" "🔵 Полная plain-строка"
+  out="$(bash -c 'source "'"$PBX"'"; ui_section "Обновляю dev"')"
+  assert_eq "plain: ui_section по умолчанию 🔵 + заголовок" "$out" "🔵 Обновляю dev"
+}
+
+test_pack_plain_invariant() {
+  # байтовый инвариант: вывод pack в non-TTY идентичен прежнему (без ANSI)
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  local out; out="$(cmd_pack proj 2>&1)"
+  local expected
+  expected="$(printf '🔵 Упаковка proj (%s) → %s\n✅ Архив готов: %s' \
+    "$ws/proj" "$ws/_dist/proj.tar.gz" "$ws/_dist/proj.tar.gz")"
+  assert_eq "pack: plain-вывод байт-в-байт" "$out" "$expected"
+  rm -rf "$ws" "$reg"
+}
+
 test_source_no_run() {
   local out; out="$(bash -c 'source "'"$PBX"'"' 2>&1)"
   assert_eq "source не запускает main (пустой вывод)" "$out" ""
@@ -679,6 +708,9 @@ test_color_gated_in_pipe
 test_ui_flags_nontty
 test_glyphs_ascii_fallback
 test_c_funcs_respect_flags
+test_ui_helpers_plain_silent
+test_ui_section_plain_invariant
+test_pack_plain_invariant
 test_repo_remote_url
 test_scan_whole_repo
 test_scan_container_one

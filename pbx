@@ -234,10 +234,13 @@ cmd_pack() {
   mkdir -p "$DIST_DIR"
   local out="$DIST_DIR/$project.tar.gz"
 
-  c_blue "🔵 Упаковка $project ($SRC) → $out"
+  ui_section "Упаковка $project" "🔵 Упаковка $project ($SRC) → $out"
+  ui_kv SRC "$SRC"
+  ui_kv OUT "$out"
   local excludes; mapfile -t excludes < <(pack_exclude_args)
   tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
+  ui_dim "размер: $(du -h "$out" | awk '{print $1}')"
   c_green "✅ Архив готов: $out"
 }
 
@@ -610,6 +613,37 @@ else
   G_PTR='>' G_BAR='|' G_MID='+' G_END='+' G_OK='*' G_NO='x'
   G_HR='----------------------------------------------'
 fi
+
+# ---- статические UI-хелперы --------------------------------------------------
+# ui_section <TTY-заголовок> [plain-строка]
+# TTY: стилизованная шапка; plain: ровно прежняя строка (по умолчанию "🔵 <заголовок>").
+ui_section() {
+  if (( UI_COLOR_OUT )); then
+    printf '\n%s%s %s%s\n%s%s%s\n' "$C_BOLD$C_BLUE" "$G_PTR" "$1" "$C_RESET" "$C_GREY" "$G_HR" "$C_RESET"
+  else
+    c_blue "${2:-🔵 $1}"
+  fi
+}
+
+# ui_kv <Latin-ключ> <значение> — только TTY-украшение (в plain строк не добавляем).
+ui_kv() {
+  (( UI_COLOR_OUT )) || return 0
+  printf '  %s%-8s%s %s\n' "$C_DIM" "$1" "$C_RESET" "$2"
+}
+
+# ui_dim <текст> — второстепенная dim-строка, только TTY.
+ui_dim() {
+  (( UI_COLOR_OUT )) || return 0
+  printf '  %s%s%s\n' "$C_DIM" "$*" "$C_RESET"
+}
+
+# ui_summary <ветка> <MR-цель> <сообщение> — итоговый блок доставки, только TTY.
+ui_summary() {
+  (( UI_COLOR_OUT )) || return 0
+  printf ' %s%s%s ветка      %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$1"
+  printf ' %s%s%s MR →       %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$2"
+  printf ' %s%s%s сообщение  %s\n' "$C_GREY" "$G_END" "$C_RESET" "$3"
+}
 
 # ---- диспетчер -------------------------------------------------------------
 main() {
