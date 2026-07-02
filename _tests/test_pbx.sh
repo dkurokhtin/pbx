@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (10) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (12) завершает без действий
   local rc=0
-  ( printf '10\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (10) → rc=0" "$rc" "0"
+  ( printf '12\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (12) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -433,9 +433,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 5 = status → вывод → Enter (menu_pause) → 10 = выход
+  # 7 = status → вывод → Enter (menu_pause) → 12 = выход
   local out
-  out="$( ( printf '5\n\n10\n' | {
+  out="$( ( printf '7\n\n12\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -997,6 +997,87 @@ test_cmd_push_default_branch_is_src_branch() {
   rm -rf "$PU_BASE" "$ws" "$reg"
 }
 
+# --- Э3: meta_update — мерж ключей в .meta ------------------------------------
+test_meta_update_creates_with_header() {
+  local d; d="$(make_ws)"
+  meta_update "$d/proj.meta" "FOO=bar" "BAZ=1"
+  assert_has "meta_update: шапка создана"  "$(head -1 "$d/proj.meta")" "# pbx meta: проект proj"
+  assert_eq  "meta_update: FOO записан"    "$(sed -n 's/^FOO=//p' "$d/proj.meta")" "bar"
+  assert_eq  "meta_update: BAZ записан"    "$(sed -n 's/^BAZ=//p' "$d/proj.meta")" "1"
+  rm -rf "$d"
+}
+
+test_meta_update_merge_preserves_order() {
+  local d; d="$(make_ws)"
+  printf '# шапка\nA=1\nB=2\n' > "$d/proj.meta"
+  meta_update "$d/proj.meta" "B=22" "C=3"
+  assert_eq "meta_update: обновление на месте, новое в конец, шапка цела" \
+    "$(cat "$d/proj.meta")" "$(printf '# шапка\nA=1\nB=22\nC=3')"
+  rm -rf "$d"
+}
+
+test_meta_update_value_with_equals() {
+  local d; d="$(make_ws)"
+  meta_update "$d/proj.meta" "BRANCH=feature/X-со=знаком"
+  assert_eq "meta_update: значение с '=' внутри" \
+    "$(sed -n 's/^BRANCH=//p' "$d/proj.meta")" "feature/X-со=знаком"
+  rm -rf "$d"
+}
+
+test_meta_update_bad_keys_skipped() {
+  local d; d="$(make_ws)"
+  printf '# шапка\nA=1\n' > "$d/proj.meta"
+  local before; before="$(cat "$d/proj.meta")"
+  meta_update "$d/proj.meta" "no-equals" "плохой ключ=x" 2>/dev/null
+  assert_eq "meta_update: кривые аргументы не трогают файл" "$(cat "$d/proj.meta")" "$before"
+  rm -rf "$d"
+}
+
+test_meta_update_crlf_normalized() {
+  local d; d="$(make_ws)"
+  printf '# шапка\r\nA=1\r\n' > "$d/proj.meta"
+  meta_update "$d/proj.meta" "A=2"
+  assert_eq "meta_update: CRLF-файл — ключ не задвоен" "$(grep -c '^A=' "$d/proj.meta")" "1"
+  assert_eq "meta_update: CRLF-файл — значение обновлено" "$(sed -n 's/^A=//p' "$d/proj.meta")" "2"
+  rm -rf "$d"
+}
+
+test_pack_meta_survives_push_keys() {
+  # pack → push-мета → pack: push-ключи выживают, pack-ключи одиночны
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  cmd_pack proj >/dev/null 2>&1
+  meta_update "$DIST_DIR/proj.meta" "PUSHED_AT=123" "PUSH_BRANCH=feature/X" \
+    "PUSH_COMMIT=abc" "PUSH_SOURCE_COMMIT=def"
+  cmd_pack proj >/dev/null 2>&1
+  assert_has "meta: PUSH_BRANCH выжил после pack" \
+    "$(cat "$DIST_DIR/proj.meta")" "PUSH_BRANCH=feature/X"
+  assert_eq "meta: COMMIT одиночен"    "$(grep -c '^COMMIT=' "$DIST_DIR/proj.meta")" "1"
+  assert_eq "meta: PACKED_AT одиночен" "$(grep -c '^PACKED_AT=' "$DIST_DIR/proj.meta")" "1"
+  rm -rf "$ws" "$reg"
+}
+
+test_cmd_push_writes_push_meta() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/M-1 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  local meta="$DIST_DIR/proj.meta"
+  assert_eq "push-мета: PUSH_BRANCH" "$(sed -n 's/^PUSH_BRANCH=//p' "$meta")" "feature/M-1"
+  local head; head="$(git -C "$PU_SRC" rev-parse HEAD)"
+  assert_eq "push-мета: PUSH_SOURCE_COMMIT = HEAD SRC" \
+    "$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$meta")" "$head"
+  if _pbx_is_sha "$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"; then
+    ok "push-мета: PUSH_COMMIT — полный SHA"
+  else
+    bad "push-мета: PUSH_COMMIT не SHA"
+  fi
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -1424,6 +1505,455 @@ test_scan_no_descend_into_repo() {
   rm -rf "$ws"
 }
 
+# --- Э3: _json_str_v2 и сбор корп-состояния ------------------------------------
+test_json_str_v2_escapes() {
+  assert_eq "v2: кавычки"     "$(_json_str_v2 'a"b')" 'a\"b'
+  assert_eq "v2: бэкслеш"     "$(_json_str_v2 'a\b')" 'a\\b'
+  assert_eq "v2: таб"         "$(_json_str_v2 $'a\tb')" 'a\tb'
+  assert_eq "v2: CR"          "$(_json_str_v2 $'a\rb')" 'a\rb'
+  assert_eq "v2: LF"          "$(_json_str_v2 $'a\nb')" 'a\nb'
+  assert_eq "v2: \\ первым (нет двойного экрана)" "$(_json_str_v2 '\')" '\\'
+  assert_eq "v2: C0 вычищаются" "$(_json_str_v2 $'a\x01b')" 'ab'
+}
+
+# Фикстура Э3: bare-«gitlab» + рабочий REPO. Ветки: feature/AAA-1 (remote,
+# ahead 1 / behind 1), fix/BBB-2 (remote-only, влита: ahead 0 / behind 1),
+# feature/CCC-3 (local-only). Глобали: CE_BASE, CE_ORIGIN, CE_REPO.
+_mk_corp_fixture() {
+  CE_BASE="$(mktemp -d)"
+  CE_ORIGIN="$CE_BASE/origin.git"; CE_REPO="$CE_BASE/repo"
+  git init -q --bare "$CE_ORIGIN"
+  git init -q -b dev "$CE_REPO"
+  ( cd "$CE_REPO" \
+    && git config user.email t@t && git config user.name t \
+    && git remote add origin "$CE_ORIGIN" \
+    && echo base > f.txt && git add -A && git commit -qm 'первый: "кавычки" и \бэкслеш' \
+    && echo more >> f.txt && git commit -qam 'второй: 100% кириллица' \
+    && git push -qu origin dev \
+    && git checkout -qb feature/AAA-1 \
+    && echo feat > feat.txt && git add -A && git commit -qm 'фича AAA' \
+    && git push -q origin feature/AAA-1 \
+    && git checkout -q dev \
+    && git checkout -qb fix/BBB-2 && git checkout -q dev \
+    && git push -q origin fix/BBB-2 \
+    && git branch -q -D fix/BBB-2 \
+    && git checkout -qb feature/CCC-3 \
+    && echo c3 > c3.txt && git add -A && git commit -qm 'локальная CCC' \
+    && git checkout -q dev \
+    && echo newer >> f.txt && git commit -qam 'третий dev-коммит' \
+    && git push -q origin dev ) >/dev/null 2>&1
+}
+
+test_corp_collect_state_branches() {
+  _mk_corp_fixture
+  corp_collect_state "$CE_REPO" dev
+  assert_eq  "collect: fetch_ok"            "$CS_FETCH_OK" "true"
+  assert_eq  "collect: base_ref"            "$CS_BASE_REF" "origin/dev"
+  assert_has "collect: сабжект верхушки"    "$CS_BASE_SUBJ" "третий dev-коммит"
+  assert_eq  "collect: total=3"             "$CS_BRANCHES_TOTAL" "3"
+  local aaa; aaa="$(printf '%s' "$CS_BRANCHES" | grep '^feature/AAA-1')"
+  assert_has "collect: AAA remote"          "$aaa" $'\tremote\t'
+  assert_eq  "collect: AAA ahead=1 behind=1" "$(printf '%s' "$aaa" | cut -f4,5)" $'1\t1'
+  local bbb; bbb="$(printf '%s' "$CS_BRANCHES" | grep '^fix/BBB-2')"
+  assert_eq  "collect: влитая BBB ahead=0"  "$(printf '%s' "$bbb" | cut -f4)" "0"
+  assert_eq  "collect: влитая BBB shortstat='-'" "$(printf '%s' "$bbb" | cut -f7)" "-"
+  local ccc; ccc="$(printf '%s' "$CS_BRANCHES" | grep '^feature/CCC-3')"
+  assert_has "collect: CCC local-only"      "$ccc" $'\tlocal\t'
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_no_base() {
+  _mk_corp_fixture
+  corp_collect_state "$CE_REPO" nosuchbase
+  assert_eq "collect: base_ref пуст без базы" "$CS_BASE_REF" ""
+  assert_eq "collect: base_sha пуст"          "$CS_BASE_SHA" ""
+  assert_eq "collect: лог пуст"               "$CS_LOG" ""
+  local aaa; aaa="$(printf '%s' "$CS_BRANCHES" | grep '^feature/AAA-1')"
+  assert_eq "collect: ahead='-' без базы"     "$(printf '%s' "$aaa" | cut -f4)" "-"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_fetch_fail() {
+  _mk_corp_fixture
+  ( cd "$CE_REPO" && git remote set-url origin "$CE_BASE/nope.git" )
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: fetch_ok=false при сбое origin" "$CS_FETCH_OK" "false"
+  assert_eq "collect: старые remote-refs живы" "$CS_BASE_REF" "origin/dev"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_detached_and_merge() {
+  _mk_corp_fixture
+  ( cd "$CE_REPO" && git checkout -q "$(git rev-parse dev)" ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: detached HEAD → current_branch пуст" "$CS_CURRENT_BRANCH" ""
+  # незавершённый merge имитируем маркером MERGE_HEAD (детект — по его наличию)
+  ( cd "$CE_REPO" && git checkout -q dev && git rev-parse dev > .git/MERGE_HEAD )
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "collect: MERGE_HEAD → in_merge=true" "$CS_IN_MERGE" "true"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_collect_state_branch_cap() {
+  _mk_corp_fixture
+  # 35 доп. remote-веток: total считает все (35 + AAA + BBB + local-only CCC = 38),
+  # в список попадают только 30 самых свежих (cap head -30, регресс SIGPIPE-фикса)
+  ( cd "$CE_REPO" \
+    && for i in $(seq 1 35); do git branch "feature/CAP-$i" >/dev/null; done \
+    && git push -q origin $(for i in $(seq 1 35); do printf 'refs/heads/feature/CAP-%s:refs/heads/feature/CAP-%s ' "$i" "$i"; done) ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "cap: branches_total считает все ветки" "$CS_BRANCHES_TOTAL" "38"
+  assert_eq "cap: в списке ровно 30 строк" "$(printf '%s' "$CS_BRANCHES" | grep -c .)" "30"
+  rm -rf "$CE_BASE"
+}
+
+test_corp_state_files_json_valid() {
+  _mk_corp_fixture
+  # гадкий сабжект: таб + кавычки + % + бэкслеш + кириллица
+  ( cd "$CE_REPO" && git commit -qam "$(printf 'га\tдкий: "q" 100%% \\x')" --allow-empty \
+    && git push -q origin dev ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  local d; d="$(make_ws)"
+  corp_state_files "$d" proj
+  local f
+  for f in state.json state.env branches.tsv log.tsv; do
+    if [[ -f "$d/$f" ]]; then ok "state-файл есть: $f"; else bad "нет файла: $f"; fi
+  done
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -m json.tool "$d/state.json" >/dev/null 2>&1; then
+      ok "state.json валиден (json.tool, гадкие сабжекты)"
+    else
+      bad "state.json НЕ валиден"
+    fi
+  fi
+  assert_eq  "state.env: PROJECT"       "$(sed -n 's/^PROJECT=//p' "$d/state.env")" "proj"
+  assert_has "state.env: BASE_SUBJECT"  "$(sed -n 's/^BASE_SUBJECT=//p' "$d/state.env")" "дкий"
+  assert_has "log.tsv: сабжект последним, таб внутри выжил" \
+    "$(head -1 "$d/log.tsv" | cut -f3-)" "дкий"
+  assert_eq  "branches.tsv: 7 полей у AAA" \
+    "$(grep '^feature/AAA-1' "$d/branches.tsv" | awk -F'\t' '{print NF}')" "7"
+  rm -rf "$CE_BASE" "$d"
+}
+
+# --- Э3: pbx snapshot — снимок корп-состояния в pbx/state зеркала ----------------
+# Фикстура: corp-фикстура + bare-зеркало + реестр. Глобали: + CE_MIRROR, SN_REG
+_mk_snap_fixture() {
+  _mk_corp_fixture
+  CE_MIRROR="$CE_BASE/mirror.git"
+  git init -q --bare "$CE_MIRROR"
+  SN_REG="$(make_ws)"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_MIRROR" > "$SN_REG/proj.conf"
+  PBX_REGISTRY_DIR="$SN_REG"
+}
+
+test_snapshot_creates_state_no_leak() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local st_before idx_before
+  st_before="$(git -C "$CE_REPO" status --porcelain)"
+  idx_before="$(sha1sum "$CE_REPO/.git/index" | cut -d' ' -f1)"
+  local rc=0
+  ( cmd_snapshot proj ) >/dev/null 2>&1 || rc=$?
+  assert_eq "snapshot: rc=0" "$rc" "0"
+  if git -C "$CE_MIRROR" show-ref --verify --quiet refs/heads/pbx/state; then
+    ok "snapshot: ветка pbx/state создана в зеркале"
+  else
+    bad "snapshot: ветки pbx/state нет в зеркале"
+  fi
+  local files; files="$(git -C "$CE_MIRROR" ls-tree --name-only pbx/state | sort | paste -sd' ' -)"
+  assert_eq "snapshot: 4 state-файла в дереве" "$files" "branches.tsv log.tsv state.env state.json"
+  # КЛЮЧЕВОЕ: корп-история НЕ утекла в зеркало
+  local corp_head; corp_head="$(git -C "$CE_REPO" rev-parse HEAD)"
+  if git -C "$CE_MIRROR" cat-file -e "$corp_head" 2>/dev/null; then
+    bad "snapshot: КОРП-КОММИТ УТЁК В ЗЕРКАЛО ($corp_head)"
+  else
+    ok "snapshot: корп-история в зеркало не утекла"
+  fi
+  # корп-репо не тронут
+  assert_eq "snapshot: worktree не тронут" "$(git -C "$CE_REPO" status --porcelain)" "$st_before"
+  assert_eq "snapshot: индекс бит-в-бит"   "$(sha1sum "$CE_REPO/.git/index" | cut -d' ' -f1)" "$idx_before"
+  # содержимое валидно
+  if command -v python3 >/dev/null 2>&1; then
+    if git -C "$CE_MIRROR" cat-file blob pbx/state:state.json | python3 -m json.tool >/dev/null 2>&1; then
+      ok "snapshot: state.json из зеркала валиден"
+    else
+      bad "snapshot: state.json из зеркала НЕ валиден"
+    fi
+  fi
+  assert_has "snapshot: ветка AAA в branches.tsv" \
+    "$(git -C "$CE_MIRROR" cat-file blob pbx/state:branches.tsv)" "feature/AAA-1"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_second_is_fast_forward() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip1; tip1="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip2; tip2="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  if [[ "$tip1" != "$tip2" ]] && git -C "$CE_MIRROR" merge-base --is-ancestor "$tip1" "$tip2"; then
+    ok "snapshot: второй — fast-forward (parent-chain)"
+  else
+    bad "snapshot: второй не ff (tip1=$tip1 tip2=$tip2)"
+  fi
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_fetch_fail_flag() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cd "$CE_REPO" && git remote set-url origin "$CE_BASE/nope.git" )
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: сбой fetch origin не фатален (rc=0)" "$rc" "0"
+  assert_has "snapshot: предупреждение fetch_ok=false" "$out" "fetch_ok=false"
+  assert_has "snapshot: FETCH_OK=false в state.env зеркала" \
+    "$(git -C "$CE_MIRROR" cat-file blob pbx/state:state.env)" "FETCH_OK=false"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_mirror_unreachable_dies() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_BASE/nope.git" > "$SN_REG/proj.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: недоступное зеркало → rc=1" "$rc" "1"
+  assert_has "snapshot: понятное сообщение" "$out" "недоступно"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_no_mirror_dies() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: без MIRROR → die" "$rc" "1"
+  assert_has "snapshot: подсказка про MIRROR" "$out" "MIRROR"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_all_mode_summary() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # второй проект без MIRROR — должен быть пропущен, не уронив обход
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj2.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot all: rc=0" "$rc" "0"
+  assert_has "snapshot all: сводка" "$out" "1 снято, 1 пропущено, 0 с ошибками"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_race_alien_survives() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  # чужой снапшот-коммит поверх pbx/state (другая машина)
+  local ad; ad="$(mktemp -d)"
+  ( git init -q "$ad" && cd "$ad" \
+    && git config user.email a@a && git config user.name a \
+    && git fetch -q "$CE_MIRROR" pbx/state \
+    && git checkout -q -b alien FETCH_HEAD \
+    && echo alien > alien.txt && git add -A && git commit -qm alien \
+    && git push -q "$CE_MIRROR" alien:refs/heads/pbx/state ) >/dev/null 2>&1
+  local alien; alien="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  if git -C "$CE_MIRROR" merge-base --is-ancestor "$alien" refs/heads/pbx/state; then
+    ok "snapshot: чужой коммит цел после нашего (parent-chain)"
+  else
+    bad "snapshot: чужой коммит потерян"
+  fi
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$ad"
+}
+
+test_snapshot_cli_dispatch_and_help() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq  "CLI: pbx snapshot проходит" "$rc" "0"
+  assert_has "CLI: итоговый баннер" "$out" "✅ proj"
+  assert_has "help: команда snapshot" "$(bash "$PBX" help 2>&1)" "pbx snapshot"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+# --- Э3: pbx corp — чтение корп-состояния дома -----------------------------------
+test_corp_read_state_rc_semantics() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local d rc
+  # rc=2: зеркало есть, снимка нет
+  d="$(make_ws)"; rc=0
+  corp_read_state "$CE_MIRROR" "$d" || rc=$?
+  assert_eq "corp_read: rc=2 без снимка" "$rc" "2"
+  # rc=0: после снапшота, файлы на месте
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  rc=0; corp_read_state "$CE_MIRROR" "$d" || rc=$?
+  assert_eq "corp_read: rc=0 при снимке" "$rc" "0"
+  if [[ -s "$d/state.json" && -s "$d/state.env" ]]; then
+    ok "corp_read: файлы непустые"
+  else
+    bad "corp_read: файлы пустые"
+  fi
+  # rc=3: зеркало недоступно
+  rc=0; corp_read_state "$CE_BASE/nope.git" "$d" || rc=$?
+  assert_eq "corp_read: rc=3 при недоступном зеркале" "$rc" "3"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$d"
+}
+
+test_cmd_corp_renders_state() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: секция проекта"    "$out" "proj: снимок"
+  assert_has "corp: base_ref"          "$out" "origin/dev"
+  assert_has "corp: ветка AAA"         "$out" "feature/AAA-1"
+  assert_has "corp: лог dev"           "$out" "третий dev-коммит"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_no_snapshot_message() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: понятное «снимка ещё нет»" "$out" "снимка ещё нет"
+  assert_has "corp: подсказка про snapshot"    "$out" "pbx snapshot proj"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_unreachable_message() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_BASE/nope.git" > "$SN_REG/proj.conf"
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: «зеркало недоступно»" "$out" "недоступно"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_stale_and_fetchfail_warns() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # рукотворный протухший снимок с fetch_ok=false (сеем как чужой pbx snapshot)
+  local sd; sd="$(mktemp -d)"
+  ( git init -q -b pbx/state "$sd" && cd "$sd" \
+    && git config user.email p@p && git config user.name p \
+    && printf '{"schema":1,"project":"proj","generated_at":123}\n' > state.json \
+    && printf 'PBX_STATE_VERSION=1\nPROJECT=proj\nGENERATED_AT=123\nHOST=lap\nFETCH_OK=false\nBASE_REF=origin/dev\nBASE_SHA=abc\nBASE_SUBJECT=x\nCURRENT_BRANCH=dev\nDIRTY=0\nIN_MERGE=false\nBRANCHES_TOTAL=0\n' > state.env \
+    && : > branches.tsv && : > log.tsv \
+    && git add -A && git commit -qm seed \
+    && git push -q "$CE_MIRROR" pbx/state:refs/heads/pbx/state ) >/dev/null 2>&1
+  local out; out="$( ( cmd_corp proj ) 2>&1 )"
+  assert_has "corp: снимок протух (>24ч)"   "$out" "протух"
+  assert_has "corp: warn fetch_ok=false"    "$out" "без связи"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$sd"
+}
+
+test_cmd_corp_json_valid() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  # второй проект без MIRROR — в --json обязан попасть с available:false
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj2.conf"
+  local out; out="$( ( cmd_corp --json ) 2>/dev/null )"
+  assert_has "corp json: available true"   "$out" '"available":true'
+  assert_has "corp json: schema из state"  "$out" '"schema":1'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "corp json: валиден"
+    else
+      bad "corp json: НЕ валиден"
+    fi
+  fi
+  local out2; out2="$( ( cmd_corp proj2 --json ) 2>/dev/null )"
+  assert_has "corp json: без MIRROR → no-mirror" "$out2" '"reason":"no-mirror"'
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_cmd_corp_tmp_cleanup() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local clean; clean="$(make_ws)"
+  ( TMPDIR="$clean" cmd_corp proj ) >/dev/null 2>&1
+  assert_eq "corp: tmp-репо убраны" \
+    "$(find "$clean" -maxdepth 1 -name 'pbx-corp-read.*' | wc -l | tr -d ' ')" "0"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$clean"
+}
+
+test_cmd_corp_cli_dispatch_and_help() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" corp proj 2>&1)" || rc=$?
+  assert_eq  "CLI: pbx corp проходит" "$rc" "0"
+  assert_has "CLI: секция вывода" "$out" "proj: снимок"
+  assert_has "help: команда corp" "$(bash "$PBX" help 2>&1)" "pbx corp"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+# --- Э3: status с MIRROR/push-инфо; меню snapshot/corp ---------------------------
+test_status_json_mirror_and_push_keys() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/S-1 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  local out; out="$(cmd_status proj --json 2>/dev/null)"
+  assert_has "status json: mirror"      "$out" "\"mirror\":\"$PU_MIRROR\""
+  assert_has "status json: push_branch" "$out" '"push_branch":"feature/S-1"'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "status json: валиден с новыми ключами"
+    else
+      bad "status json: НЕ валиден"
+    fi
+  fi
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
+test_status_json_mirror_sentinels() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"
+  local out; out="$(cmd_status plainproj --json 2>/dev/null)"
+  assert_has "status json: mirror \"\""     "$out" '"mirror":""'
+  assert_has "status json: pushed_at -1"    "$out" '"pushed_at":-1'
+  rm -rf "$ws" "$reg"
+}
+
+test_menu_snapshot_runs_and_exits() {
+  # 4 = snapshot: пишущая команда — прогон и выход из меню
+  local ws reg out rc=0; ws="$(make_ws)"; reg="$(make_ws)"
+  out="$( ( printf '4\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || rc=$?
+  assert_has "меню: snapshot вызван"           "$out" "Снимок корп-состояния"
+  assert_eq  "меню: snapshot → выход, rc=0"     "$rc" "0"
+  rm -rf "$ws" "$reg"
+}
+
+test_menu_corp_returns_to_menu() {
+  # 5 = corp (read-only) → Enter (menu_pause) → 12 = выход
+  local ws reg out; ws="$(make_ws)"; reg="$(make_ws)"
+  out="$( ( printf '5\n\n12\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || true
+  assert_has "меню: corp вызван" "$out" "Корп-состояние"
+  assert_eq  "меню: после corp снова меню" \
+    "$(printf '%s' "$out" | grep -c 'что делаем')" "2"
+  rm -rf "$ws" "$reg"
+}
+
 test_source_no_run
 test_color_gated_in_pipe
 test_ui_flags_nontty
@@ -1516,6 +2046,40 @@ test_push_snapshot_no_changes
 test_push_snapshot_concurrent_commit_survives
 test_cmd_push_requires_mirror
 test_cmd_push_default_branch_is_src_branch
+test_meta_update_creates_with_header
+test_meta_update_merge_preserves_order
+test_meta_update_value_with_equals
+test_meta_update_bad_keys_skipped
+test_meta_update_crlf_normalized
+test_pack_meta_survives_push_keys
+test_cmd_push_writes_push_meta
+test_json_str_v2_escapes
+test_corp_collect_state_branches
+test_corp_collect_state_no_base
+test_corp_collect_state_fetch_fail
+test_corp_collect_state_detached_and_merge
+test_corp_collect_state_branch_cap
+test_corp_state_files_json_valid
+test_snapshot_creates_state_no_leak
+test_snapshot_second_is_fast_forward
+test_snapshot_fetch_fail_flag
+test_snapshot_mirror_unreachable_dies
+test_snapshot_no_mirror_dies
+test_snapshot_all_mode_summary
+test_snapshot_race_alien_survives
+test_snapshot_cli_dispatch_and_help
+test_corp_read_state_rc_semantics
+test_cmd_corp_renders_state
+test_cmd_corp_no_snapshot_message
+test_cmd_corp_unreachable_message
+test_cmd_corp_stale_and_fetchfail_warns
+test_cmd_corp_json_valid
+test_cmd_corp_tmp_cleanup
+test_cmd_corp_cli_dispatch_and_help
+test_status_json_mirror_and_push_keys
+test_status_json_mirror_sentinels
+test_menu_snapshot_runs_and_exits
+test_menu_corp_returns_to_menu
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo
