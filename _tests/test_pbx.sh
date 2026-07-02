@@ -1622,6 +1622,151 @@ test_corp_state_files_json_valid() {
   rm -rf "$CE_BASE" "$d"
 }
 
+# --- Э3: pbx snapshot — снимок корп-состояния в pbx/state зеркала ----------------
+# Фикстура: corp-фикстура + bare-зеркало + реестр. Глобали: + CE_MIRROR, SN_REG
+_mk_snap_fixture() {
+  _mk_corp_fixture
+  CE_MIRROR="$CE_BASE/mirror.git"
+  git init -q --bare "$CE_MIRROR"
+  SN_REG="$(make_ws)"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_MIRROR" > "$SN_REG/proj.conf"
+  PBX_REGISTRY_DIR="$SN_REG"
+}
+
+test_snapshot_creates_state_no_leak() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local st_before idx_before
+  st_before="$(git -C "$CE_REPO" status --porcelain)"
+  idx_before="$(sha1sum "$CE_REPO/.git/index" | cut -d' ' -f1)"
+  local rc=0
+  ( cmd_snapshot proj ) >/dev/null 2>&1 || rc=$?
+  assert_eq "snapshot: rc=0" "$rc" "0"
+  if git -C "$CE_MIRROR" show-ref --verify --quiet refs/heads/pbx/state; then
+    ok "snapshot: ветка pbx/state создана в зеркале"
+  else
+    bad "snapshot: ветки pbx/state нет в зеркале"
+  fi
+  local files; files="$(git -C "$CE_MIRROR" ls-tree --name-only pbx/state | sort | paste -sd' ' -)"
+  assert_eq "snapshot: 4 state-файла в дереве" "$files" "branches.tsv log.tsv state.env state.json"
+  # КЛЮЧЕВОЕ: корп-история НЕ утекла в зеркало
+  local corp_head; corp_head="$(git -C "$CE_REPO" rev-parse HEAD)"
+  if git -C "$CE_MIRROR" cat-file -e "$corp_head" 2>/dev/null; then
+    bad "snapshot: КОРП-КОММИТ УТЁК В ЗЕРКАЛО ($corp_head)"
+  else
+    ok "snapshot: корп-история в зеркало не утекла"
+  fi
+  # корп-репо не тронут
+  assert_eq "snapshot: worktree не тронут" "$(git -C "$CE_REPO" status --porcelain)" "$st_before"
+  assert_eq "snapshot: индекс бит-в-бит"   "$(sha1sum "$CE_REPO/.git/index" | cut -d' ' -f1)" "$idx_before"
+  # содержимое валидно
+  if command -v python3 >/dev/null 2>&1; then
+    if git -C "$CE_MIRROR" cat-file blob pbx/state:state.json | python3 -m json.tool >/dev/null 2>&1; then
+      ok "snapshot: state.json из зеркала валиден"
+    else
+      bad "snapshot: state.json из зеркала НЕ валиден"
+    fi
+  fi
+  assert_has "snapshot: ветка AAA в branches.tsv" \
+    "$(git -C "$CE_MIRROR" cat-file blob pbx/state:branches.tsv)" "feature/AAA-1"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_second_is_fast_forward() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip1; tip1="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip2; tip2="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  if [[ "$tip1" != "$tip2" ]] && git -C "$CE_MIRROR" merge-base --is-ancestor "$tip1" "$tip2"; then
+    ok "snapshot: второй — fast-forward (parent-chain)"
+  else
+    bad "snapshot: второй не ff (tip1=$tip1 tip2=$tip2)"
+  fi
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_fetch_fail_flag() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cd "$CE_REPO" && git remote set-url origin "$CE_BASE/nope.git" )
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: сбой fetch origin не фатален (rc=0)" "$rc" "0"
+  assert_has "snapshot: предупреждение fetch_ok=false" "$out" "fetch_ok=false"
+  assert_has "snapshot: FETCH_OK=false в state.env зеркала" \
+    "$(git -C "$CE_MIRROR" cat-file blob pbx/state:state.env)" "FETCH_OK=false"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_mirror_unreachable_dies() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\nMIRROR=%s\n' "$CE_REPO" "$CE_BASE/nope.git" > "$SN_REG/proj.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: недоступное зеркало → rc=1" "$rc" "1"
+  assert_has "snapshot: понятное сообщение" "$out" "недоступно"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_no_mirror_dies() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot proj ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot: без MIRROR → die" "$rc" "1"
+  assert_has "snapshot: подсказка про MIRROR" "$out" "MIRROR"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_all_mode_summary() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # второй проект без MIRROR — должен быть пропущен, не уронив обход
+  printf 'REPO=%s\n' "$CE_REPO" > "$SN_REG/proj2.conf"
+  local out rc=0
+  out="$( ( cmd_snapshot ) 2>&1 )" || rc=$?
+  assert_eq  "snapshot all: rc=0" "$rc" "0"
+  assert_has "snapshot all: сводка" "$out" "1 снято, 1 пропущено, 0 с ошибками"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_snapshot_race_alien_survives() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  # чужой снапшот-коммит поверх pbx/state (другая машина)
+  local ad; ad="$(mktemp -d)"
+  ( git init -q "$ad" && cd "$ad" \
+    && git config user.email a@a && git config user.name a \
+    && git fetch -q "$CE_MIRROR" pbx/state \
+    && git checkout -q -b alien FETCH_HEAD \
+    && echo alien > alien.txt && git add -A && git commit -qm alien \
+    && git push -q "$CE_MIRROR" alien:refs/heads/pbx/state ) >/dev/null 2>&1
+  local alien; alien="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  if git -C "$CE_MIRROR" merge-base --is-ancestor "$alien" refs/heads/pbx/state; then
+    ok "snapshot: чужой коммит цел после нашего (parent-chain)"
+  else
+    bad "snapshot: чужой коммит потерян"
+  fi
+  rm -rf "$CE_BASE" "$SN_REG" "$ws" "$ad"
+}
+
+test_snapshot_cli_dispatch_and_help() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq  "CLI: pbx snapshot проходит" "$rc" "0"
+  assert_has "CLI: итоговый баннер" "$out" "✅ proj"
+  assert_has "help: команда snapshot" "$(bash "$PBX" help 2>&1)" "pbx snapshot"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
 test_source_no_run
 test_color_gated_in_pipe
 test_ui_flags_nontty
@@ -1727,6 +1872,14 @@ test_corp_collect_state_no_base
 test_corp_collect_state_fetch_fail
 test_corp_collect_state_detached_and_merge
 test_corp_state_files_json_valid
+test_snapshot_creates_state_no_leak
+test_snapshot_second_is_fast_forward
+test_snapshot_fetch_fail_flag
+test_snapshot_mirror_unreachable_dies
+test_snapshot_no_mirror_dies
+test_snapshot_all_mode_summary
+test_snapshot_race_alien_survives
+test_snapshot_cli_dispatch_and_help
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo

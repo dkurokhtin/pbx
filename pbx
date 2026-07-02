@@ -966,6 +966,144 @@ corp_state_files() {
   return 0
 }
 
+# snapshot_push <REPO> <MIRROR> <проект> — собрать состояние корп-репо и
+# закоммитить в ветку PBX_STATE_BRANCH зеркала. stdout: sha коммита; rc=1 — сбой.
+# КОРП-РЕПО не трогается: файлы во внешнем mktemp, блобы hash-object -w
+# (только object db), дерево mktree (без индекса), у коммита НЕТ корп-родителей.
+snapshot_push() {
+  local repo="$1" mirror="$2" project="$3"
+  [[ -e "$repo/.git" ]] || { c_warn "snapshot: не git-репозиторий: $repo"; return 1; }
+
+  # ls-remote различает «ветки нет» (rc=0, пусто) и «репо недоступен» (rc≠0);
+  # fetch даёт rc=128 в обоих случаях — не годится (проверено).
+  local ls_out ls_rc=0
+  ls_out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$repo" ls-remote "$mirror" "refs/heads/$PBX_STATE_BRANCH" 2>/dev/null)" || ls_rc=$?
+  if (( ls_rc != 0 )); then
+    c_warn "snapshot: зеркало недоступно: $mirror (VPN/PAT/URL?)"
+    return 1
+  fi
+
+  corp_collect_state "$repo" "$BASE_BRANCH"
+  [[ "$CS_FETCH_OK" == true ]] \
+    || c_warn "⚠️  fetch origin не удался — снимок по последним известным remote-refs (fetch_ok=false)"
+
+  local tmpd; tmpd="$(mktemp -d -t pbx-state.XXXXXX)" || { c_warn "snapshot: mktemp не удался"; return 1; }
+  corp_state_files "$tmpd" "$project"
+
+  # блобы: пути ТОЛЬКО абсолютные (git -C делает chdir — относительный путь
+  # скрипта не найдётся); mktree: TAB перед именем обязателен (иначе fatal).
+  local f b tree_in=''
+  for f in state.json state.env branches.tsv log.tsv; do
+    if ! b="$(git -C "$repo" hash-object -w "$tmpd/$f" 2>/dev/null)"; then
+      rm -rf "$tmpd"; c_warn "snapshot: hash-object не удался ($f)"; return 1
+    fi
+    tree_in+="100644 blob ${b}"$'\t'"${f}"$'\n'
+  done
+  rm -rf "$tmpd"
+  local tree
+  tree="$(printf '%s' "$tree_in" | git -C "$repo" mktree 2>/dev/null)" \
+    || { c_warn "snapshot: mktree не удался"; return 1; }
+  _pbx_is_sha "$tree" || { c_warn "snapshot: mktree вернул не SHA ('$tree')"; return 1; }
+
+  local branch_exists=0
+  [[ -n "$ls_out" ]] && branch_exists=1
+
+  local attempt max_attempts=3
+  for attempt in $(seq 1 "$max_attempts"); do
+    # свежий fetch ОБЯЗАТЕЛЕН перед каждым commit-tree: после чужого push
+    # новый tip отсутствует в локальном odb (fatal 'not a valid object')
+    local remote_tip=""
+    if (( branch_exists )); then
+      if GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$repo" fetch -q "$mirror" "$PBX_STATE_BRANCH" 2>/dev/null; then
+        remote_tip="$(git -C "$repo" rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+      fi
+    fi
+    local -a parent_args=()
+    _pbx_is_sha "$remote_tip" && parent_args+=(-p "$remote_tip")
+    # КРИТИЧНО: никаких родителей из корп-истории — push утащил бы её в зеркало.
+
+    local msg commit_sha
+    msg="$(printf 'pbx snapshot: %s @ %s\n\nbase: %s\nfetch_ok: %s\n' \
+      "$project" "$(hostname 2>/dev/null || echo '-')" "${CS_BASE_REF:-—}" "$CS_FETCH_OK")"
+    if ! commit_sha="$(GIT_AUTHOR_NAME=pbx GIT_AUTHOR_EMAIL=pbx@local \
+        GIT_COMMITTER_NAME=pbx GIT_COMMITTER_EMAIL=pbx@local \
+        git -C "$repo" commit-tree "$tree" ${parent_args[@]+"${parent_args[@]}"} -m "$msg" 2>&1)"; then
+      c_warn "snapshot: commit-tree не удался: $commit_sha"; return 1
+    fi
+    # КРИТИЧНО: пустой src-ref в refspec = УДАЛЕНИЕ ветки на remote.
+    if ! _pbx_is_sha "$commit_sha"; then
+      c_warn "snapshot: commit-tree вернул не SHA ('$commit_sha') — отмена (пуш пустого ref удалил бы ветку!)"
+      return 1
+    fi
+    # назначение — ПОЛНЫЙ refname (короткое падает на несуществующей ветке)
+    local out push_rc=0
+    out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$repo" push "$mirror" \
+      "$commit_sha:refs/heads/$PBX_STATE_BRANCH" 2>&1)" || push_rc=$?
+    if (( push_rc == 0 )); then
+      printf '%s\n' "$commit_sha"
+      return 0
+    fi
+    # ретрай осмыслен только при отклонении (rc=1 + [rejected]); rc=128 — недоступность
+    if (( push_rc != 1 )) || [[ "$out" != *"[rejected]"* ]]; then
+      c_warn "snapshot: push не удался (rc=$push_rc):"
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+    c_warn "snapshot: попытка $attempt/$max_attempts отклонена (гонка на зеркале?)"
+    branch_exists=1   # после отклонения ветка точно есть — в ретрае фетчим tip
+  done
+  c_warn "snapshot: не удалось за $max_attempts попыток"
+  return 1
+}
+
+cmd_snapshot() {
+  local project; project="$(strip_cr "${1:-}")"
+  if [[ -n "$project" ]]; then
+    PBX_CURRENT_PROJECT="$project"
+    valid_project "$project"
+    load_config "$project"
+    [[ -e "$REPO/.git" ]] || die "REPO не git-репозиторий: $REPO"
+    [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project'. Добавь MIRROR=git@github.com:<user>/<repo>.git в $PBX_REGISTRY_DIR/$project.conf"
+    ui_section "Снимок $project" "🔵 Снимок состояния $project ($REPO) → $MIRROR ($PBX_STATE_BRANCH)"
+    ui_kv REPO "$REPO"
+    ui_kv MIRROR "$MIRROR"
+    ui_kv BASE "$BASE_BRANCH"
+    local sha
+    sha="$(snapshot_push "$REPO" "$MIRROR" "$project")" || die "pbx snapshot не удался (см. вывод выше)"
+    c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    return 0
+  fi
+
+  # без аргумента: все проекты реестра с REPO-git и MIRROR
+  ui_section "Снимок корп-состояния" "🔵 Снимок корп-состояния (все проекты):"
+  local -a names=()
+  mapfile -t names < <(list_projects)
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов не найдено)"
+    return 0
+  fi
+  local p snapped=0 skipped=0 failed=0 sha
+  for p in "${names[@]}"; do
+    load_config "$p"
+    if [[ ! -e "$REPO/.git" || -z "${MIRROR:-}" ]]; then
+      ui_dim "  $p — пропуск (нет REPO-git или MIRROR)"
+      skipped=$((skipped+1))
+      continue
+    fi
+    sha=''
+    if sha="$(snapshot_push "$REPO" "$MIRROR" "$p")"; then
+      c_green "  ✅ $p: снимок ${sha:0:7}"
+      snapped=$((snapped+1))
+    else
+      c_warn "  ❌ $p: снимок не удался"
+      failed=$((failed+1))
+    fi
+  done
+  c_blue "🔵 Итог: $snapped снято, $skipped пропущено, $failed с ошибками"
+  if (( failed > 0 && snapped == 0 )); then return 1; fi
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
@@ -1317,6 +1455,7 @@ pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
+  pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
@@ -1363,6 +1502,7 @@ ${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
 ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
+  ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → ветка pbx/state зеркала${C_RESET}
   ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
@@ -1680,6 +1820,7 @@ main() {
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
     push)               require_wsl; cmd_push "$@" ;;
+    snapshot)           cmd_snapshot "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
