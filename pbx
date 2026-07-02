@@ -44,8 +44,7 @@ die() {
   # (ранние die на аргументах — до резолва — просто выходят).
   if [[ -n "${PBX_CURRENT_PROJECT:-}" && -z "${PBX_IN_DIE:-}" ]]; then
     export PBX_IN_DIE=1
-    local lf="$DIST_DIR/pbx-$PBX_CURRENT_PROJECT.log"
-    mkdir -p "$DIST_DIR" 2>/dev/null || true
+    local lf; lf="$(_diag_logfile "$PBX_CURRENT_PROJECT")"
     { printf '\n=== [ОШИБКА] %s ===\n' "$*"; collect_diag "$PBX_CURRENT_PROJECT"; } >> "$lf" 2>&1 || true
     c_red "🧭 Диагностика для агента: $lf"
   fi
@@ -440,12 +439,21 @@ collect_diag() {
   )
 }
 
-# Собрать диагностику и вывести в stdout + дописать в $DIST_DIR/pbx-<проект>.log.
+# Путь лог-файла: $DIST_DIR если писабелен, иначе $HOME, иначе /tmp. DIST_DIR по
+# умолчанию — home-путь и на других машинах может не существовать, поэтому fallback.
+_diag_logfile() {
+  local project="$1" dir="$DIST_DIR" name
+  if [[ -n "$project" ]]; then name="pbx-$project.log"; else name="pbx.log"; fi
+  if ! { mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; }; then
+    dir="$HOME"; [[ -w "$dir" ]] || dir="${TMPDIR:-/tmp}"
+  fi
+  printf '%s/%s' "$dir" "$name"
+}
+
+# Собрать диагностику и вывести в stdout + дописать в лог-файл (best-effort).
 cmd_log() {
   local project; project="$(strip_cr "${1:-}")"
-  mkdir -p "$DIST_DIR"
-  local lf
-  if [[ -n "$project" ]]; then lf="$DIST_DIR/pbx-$project.log"; else lf="$DIST_DIR/pbx.log"; fi
+  local lf; lf="$(_diag_logfile "$project")"
   { collect_diag "$project"; } | tee -a "$lf"
   c_blue "🧭 Диагностика записана: $lf"
 }

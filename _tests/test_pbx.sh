@@ -449,6 +449,21 @@ test_log_no_project() {
   cd "$HERE"; rm -rf "$base"
 }
 
+test_log_survives_unwritable_dist() {
+  # Боевой путь: pbx log запускается напрямую под активным set -e (как на ноуте,
+  # где DIST_DIR по умолчанию = несуществующий home-путь). Реальный подпроцесс,
+  # а не $()-обёртка — иначе set -e маскируется и баг не воспроизводится.
+  local base; base="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$base/src" "$base/repo" > "$reg/proj.conf"
+  local out rc=0
+  out="$(PBX_DIST_DIR=/proc/nonexistent/_dist PBX_REGISTRY_DIR="$reg" HOME="$base" \
+         bash "$PBX" log proj 2>&1)" || rc=$?
+  assert_eq  "log: не падает при недоступном DIST_DIR (rc=0)" "$rc" "0"
+  assert_has "log: отчёт в stdout всё равно есть"            "$out" "[config]"
+  rm -rf "$base" "$reg"
+}
+
 test_die_writes_diag() {
   local base; base="$(make_ws)"
   local repo="$base/repo"
@@ -664,6 +679,7 @@ test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_log_reports_project
 test_log_no_project
+test_log_survives_unwritable_dist
 test_die_writes_diag
 test_add_creates_entry
 test_add_refuses_overwrite
