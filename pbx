@@ -385,6 +385,112 @@ status_collect() {
   return 0
 }
 
+# экранирование строки для ручной JSON-сборки (jq в системе нет)
+_json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# человекочитаемая метка дрейфа по ST_* текущего проекта
+status_drift_label() {
+  if [[ "$ST_SRC_EXISTS" == false ]]; then printf 'нет SRC'; return 0; fi
+  if [[ "$ST_ARCHIVE_EXISTS" == false ]]; then printf 'нет архива'; return 0; fi
+  case "$ST_DRIFT" in
+    exact)
+      local s=''
+      [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] && s="+${ST_UNPACKED} коммит."
+      if [[ "$ST_DIRTY_NOW" != -1 && "$ST_DIRTY_NOW" -gt 0 ]]; then
+        s="${s:+$s, }${ST_DIRTY_NOW} файл. правок"
+      fi
+      if [[ -n "$s" ]]; then printf '%s' "$s"; else printf '%s упаковано' "$G_OK"; fi
+      ;;
+    heuristic)
+      if [[ "$ST_STALE" == true ]]; then printf '~протух'; else printf '~ок'; fi
+      ;;
+    none)
+      printf 'не git — неизвестен'
+      ;;
+  esac
+  return 0
+}
+
+# JSON-массив статусов (схема — спека §4; порядок ключей фиксирован)
+status_json() {
+  local p first=1
+  printf '['
+  for p in "$@"; do
+    load_config "$p"
+    status_collect "$p"
+    if (( first )); then first=0; else printf ','; fi
+    printf '\n  {"name":"%s","src":"%s","src_exists":%s,"git":%s,' \
+      "$(_json_str "$ST_NAME")" "$(_json_str "$ST_SRC")" "$ST_SRC_EXISTS" "$ST_GIT"
+    printf '"branch":"%s","dirty":%s,"upstream":"%s","ahead":%s,"behind":%s,' \
+      "$(_json_str "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str "$ST_UPSTREAM")" "$ST_AHEAD" "$ST_BEHIND"
+    printf '"archive":"%s","archive_exists":%s,"archive_mtime":%s,"archive_size":"%s",' \
+      "$(_json_str "$ST_ARCHIVE")" "$ST_ARCHIVE_EXISTS" "$ST_ARCHIVE_MTIME" "$(_json_str "$ST_ARCHIVE_SIZE")"
+    printf '"meta_commit":"%s","meta_branch":"%s","meta_packed_at":%s,"meta_dirty":%s,' \
+      "$(_json_str "$ST_META_COMMIT")" "$(_json_str "$ST_META_BRANCH")" "$ST_META_PACKED_AT" "$ST_META_DIRTY"
+    printf '"drift":"%s","unpacked_commits":%s,"dirty_now":%s,"stale":%s,' \
+      "$ST_DRIFT" "$ST_UNPACKED" "$ST_DIRTY_NOW" "$ST_STALE"
+    printf '"repo":"%s","repo_exists":%s}' "$(_json_str "$ST_REPO")" "$ST_REPO_EXISTS"
+  done
+  printf '\n]\n'
+  return 0
+}
+
+cmd_status() {
+  local project='' json=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "Неизвестный флаг: $a (ожидается --json)" ;;
+      *) [[ -n "$project" ]] && die "Лишний аргумент: $a (проект указывается один)"; project="$a" ;;
+    esac
+  done
+  [[ -n "$project" ]] && valid_project "$project"
+
+  local -a names=()
+  if [[ -n "$project" ]]; then names=("$project"); else mapfile -t names < <(list_projects); fi
+
+  if (( json )); then
+    status_json ${names[@]+"${names[@]}"}
+    return 0
+  fi
+
+  ui_section "Статус проектов" "🔵 Статус проектов:"
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов не найдено)"
+    return 0
+  fi
+  local p drift b color reset
+  for p in "${names[@]}"; do
+    load_config "$p"
+    status_collect "$p"
+    drift="$(status_drift_label)"
+    b="$ST_BRANCH"; [[ -z "$b" ]] && b='—'
+    if (( ${#b} > 24 )); then b="${b:0:23}…"; fi
+    local dirty_disp="$ST_DIRTY"; [[ "$dirty_disp" == -1 ]] && dirty_disp='—'
+    local arch_disp='—'
+    if [[ "$ST_ARCHIVE_EXISTS" == true ]]; then
+      arch_disp="$ST_ARCHIVE_SIZE $(date -d "@$ST_ARCHIVE_MTIME" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+    fi
+    color=''; reset=''
+    if (( UI_COLOR_OUT )); then
+      reset="$C_RESET"
+      if [[ "$ST_STALE" == true ]]; then color="$C_YELLOW"
+      elif [[ "$drift" == "$G_OK "* ]]; then color="$C_GREEN"
+      else color="$C_DIM"; fi
+    fi
+    printf '  %-14s %-24s %5s  %-14s %s%s%s\n' \
+      "$p" "$b" "$dirty_disp" "$arch_disp" "$color" "$drift" "$reset"
+    if [[ "$ST_REPO_EXISTS" == true && -e "$ST_REPO/.git" ]]; then
+      local rb rstate
+      rb="$(git -C "$ST_REPO" branch --show-current 2>/dev/null || echo '?')"
+      if [[ -n "$(git -C "$ST_REPO" status --porcelain 2>/dev/null)" ]]; then rstate='dirty'; else rstate='clean'; fi
+      ui_dim "repo: $ST_REPO — $rb ($rstate)"
+    fi
+  done
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
@@ -696,6 +802,7 @@ pbx — доставка проектов Pybotx (WSL)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
   pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
                                                 (config/repo/archive/env; pbx также сам пишет её в этот файл при любой ошибке)
+  pbx status  [проект] [--json]                 сводка: ветка, dirty, дрейф от последнего pack, свежесть архива
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
@@ -739,6 +846,7 @@ ${C_BOLD}Команды${C_RESET}
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
   ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
+  ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
   ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
   ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
   ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
@@ -1031,6 +1139,7 @@ main() {
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
     log)                cmd_log "$@" ;;
+    status|st)          cmd_status "$@" ;;
     list|ls)            cmd_list ;;
     help|-h|--help)     cmd_help ;;
     *) c_red "Неизвестная команда: $cmd"; echo; cmd_help; exit 1 ;;

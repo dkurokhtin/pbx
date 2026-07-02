@@ -669,6 +669,57 @@ test_status_collect_upstream_ahead() {
   rm -rf "$base" "$reg"
 }
 
+# --- Task 3: cmd_status — таблица + --json + диспетчер + help -----------------
+test_status_json_valid_and_pure() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  local out; out="$(cmd_status --json 2>/dev/null)"
+  assert_has "json: начинается с [" "${out:0:1}" "["
+  assert_has "json: имя проекта"    "$out" '"name":"proj"'
+  assert_has "json: drift exact"    "$out" '"drift":"exact"'
+  assert_has "json: git true"       "$out" '"git":true'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "json: валиден (python3 json.load)"
+    else
+      bad "json: НЕ валиден (python3 json.load)"
+    fi
+  fi
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_json_sentinels_nongit() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"
+  local out; out="$(cmd_status plainproj --json 2>/dev/null)"
+  assert_has "json-сентинели: git false"  "$out" '"git":false'
+  assert_has "json-сентинели: branch \"\"" "$out" '"branch":""'
+  assert_has "json-сентинели: dirty -1"   "$out" '"dirty":-1'
+  assert_has "json-сентинели: drift none" "$out" '"drift":"none"'
+  rm -rf "$ws" "$reg"
+}
+
+test_status_table_pipe_no_ansi() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/alpha"
+  local out; out="$(PBX_WORKSPACE="$ws" PBX_REGISTRY_DIR="$reg" bash "$PBX" status 2>&1)"
+  assert_no  "status в пайпе: без ANSI" "$out" $'\033'
+  assert_has "status в пайпе: заголовок" "$out" "Статус проектов"
+  assert_has "status в пайпе: строка проекта" "$out" "alpha"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_unknown_project_dies() {
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local rc=0
+  ( cmd_status "no-such-proj-$$" ) >/dev/null 2>&1 || rc=$?
+  assert_eq "status: неизвестный проект → ошибка" "$rc" "1"
+  rm -rf "$reg" "$ws"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -1065,6 +1116,10 @@ test_status_collect_heuristic
 test_status_collect_nongit_and_noarchive
 test_status_collect_orphan_repo
 test_status_collect_upstream_ahead
+test_status_json_valid_and_pure
+test_status_json_sentinels_nongit
+test_status_table_pipe_no_ansi
+test_status_unknown_project_dies
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
