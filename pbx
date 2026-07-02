@@ -301,6 +301,90 @@ cmd_pack() {
   c_green "✅ Архив готов: $out"
 }
 
+# ---- status: сбор данных одного проекта ---------------------------------------
+# Заполняет ST_*-глобали. Вызывать ПОСЛЕ load_config (берёт SRC/REPO/DIST_DIR).
+# Сентинели: строка '' (неизвестно), число -1; булевы — строки true/false.
+# ST_STALE=true ⇔ нужен новый pack: нет архива при живом SRC; (exact) есть
+# неупакованные коммиты или dirty; (heuristic) архив старее коммита или dirty.
+status_collect() {
+  local project="$1"
+  ST_NAME="$project"
+  ST_SRC="$SRC"; ST_SRC_EXISTS=false; ST_GIT=false
+  ST_BRANCH=''; ST_DIRTY=-1; ST_UPSTREAM=''; ST_AHEAD=-1; ST_BEHIND=-1
+  ST_ARCHIVE="$DIST_DIR/$project.tar.gz"; ST_ARCHIVE_EXISTS=false
+  ST_ARCHIVE_MTIME=-1; ST_ARCHIVE_SIZE=''
+  ST_META_COMMIT=''; ST_META_BRANCH=''; ST_META_PACKED_AT=-1; ST_META_DIRTY=-1
+  ST_DRIFT='none'; ST_UNPACKED=-1; ST_DIRTY_NOW=-1; ST_STALE=false
+  ST_REPO="$REPO"; ST_REPO_EXISTS=false
+
+  [[ -d "$ST_SRC" ]] && ST_SRC_EXISTS=true
+  [[ -d "$ST_REPO" ]] && ST_REPO_EXISTS=true
+
+  if [[ "$ST_SRC_EXISTS" == true && -e "$ST_SRC/.git" ]]; then
+    ST_GIT=true
+    ST_BRANCH="$(git -C "$ST_SRC" branch --show-current 2>/dev/null || true)"
+    [[ -n "$ST_BRANCH" ]] || ST_BRANCH='HEAD'
+    # dirty без пайпа под pipefail: сбой git (битый .git) НЕ роняет сбор —
+    # присваивание в условии if не триггерит set -e; grep -c сам печатает 0
+    local st_out=''
+    if st_out="$(git -C "$ST_SRC" status --porcelain 2>/dev/null)"; then
+      ST_DIRTY="$(printf '%s' "$st_out" | grep -c . || true)"
+    fi
+    ST_DIRTY_NOW="$ST_DIRTY"
+    ST_UPSTREAM="$(git -C "$ST_SRC" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)"
+    if [[ -n "$ST_UPSTREAM" ]]; then
+      local lr
+      lr="$(git -C "$ST_SRC" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || true)"
+      if [[ -n "$lr" ]]; then
+        ST_BEHIND="${lr%%$'\t'*}"
+        ST_AHEAD="${lr##*$'\t'}"
+      fi
+    fi
+  fi
+
+  if [[ -f "$ST_ARCHIVE" ]]; then
+    ST_ARCHIVE_EXISTS=true
+    ST_ARCHIVE_MTIME="$(date -r "$ST_ARCHIVE" +%s 2>/dev/null || echo -1)"
+    ST_ARCHIVE_SIZE="$(du -h "$ST_ARCHIVE" 2>/dev/null | awk '{print $1}')"
+  fi
+
+  local meta="$DIST_DIR/$project.meta"
+  if [[ -f "$meta" ]]; then
+    ST_META_COMMIT="$(sed -n 's/^COMMIT=//p' "$meta")"
+    ST_META_BRANCH="$(sed -n 's/^BRANCH=//p' "$meta")"
+    ST_META_PACKED_AT="$(sed -n 's/^PACKED_AT=//p' "$meta")"
+    ST_META_DIRTY="$(sed -n 's/^DIRTY_AT_PACK=//p' "$meta")"
+    [[ "$ST_META_COMMIT" == '-' ]] && ST_META_COMMIT=''
+    [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
+    [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
+    [[ -n "$ST_META_PACKED_AT" ]] || ST_META_PACKED_AT=-1
+  fi
+
+  # дрейф от последнего pack
+  if [[ "$ST_GIT" == true && "$ST_ARCHIVE_EXISTS" == true ]]; then
+    if [[ -n "$ST_META_COMMIT" ]] \
+       && git -C "$ST_SRC" cat-file -e "$ST_META_COMMIT^{commit}" 2>/dev/null; then
+      ST_DRIFT='exact'
+      ST_UNPACKED="$(git -C "$ST_SRC" rev-list --count "$ST_META_COMMIT..HEAD" 2>/dev/null || echo -1)"
+      if [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] || [[ "$ST_DIRTY_NOW" -gt 0 ]]; then
+        ST_STALE=true
+      fi
+    else
+      ST_DRIFT='heuristic'
+      local last_ct
+      last_ct="$(git -C "$ST_SRC" log -1 --format=%ct 2>/dev/null || echo -1)"
+      if [[ "$last_ct" != -1 && "$ST_ARCHIVE_MTIME" != -1 && "$last_ct" -gt "$ST_ARCHIVE_MTIME" ]]; then
+        ST_STALE=true
+      fi
+      [[ "$ST_DIRTY_NOW" -gt 0 ]] && ST_STALE=true
+    fi
+  fi
+  if [[ "$ST_SRC_EXISTS" == true && "$ST_ARCHIVE_EXISTS" == false ]]; then
+    ST_STALE=true
+  fi
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"

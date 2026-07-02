@@ -580,6 +580,95 @@ test_pack_meta_broken_git_best_effort() {
   rm -rf "$ws" "$reg"
 }
 
+# --- status_collect: дрейф ------------------------------------------------------
+# Общая фикстура: git-проект в WORKSPACE + pack. Возвращает пути через глобали
+# SC_WS/SC_REG (вызывающий обязан rm -rf и unset).
+_mk_status_fixture() {
+  SC_WS="$(make_ws)"; WORKSPACE="$SC_WS"; DIST_DIR="$SC_WS/_dist"
+  SC_REG="$(make_ws)"; PBX_REGISTRY_DIR="$SC_REG"
+  mkdir -p "$SC_WS/proj/src"; echo hi > "$SC_WS/proj/src/a.txt"
+  ( cd "$SC_WS/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git add -A && git commit -qm init ) >/dev/null 2>&1
+}
+
+test_status_collect_exact_clean() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "exact-clean: drift"    "$ST_DRIFT"    "exact"
+  assert_eq "exact-clean: unpacked" "$ST_UNPACKED" "0"
+  assert_eq "exact-clean: dirty"    "$ST_DIRTY_NOW" "0"
+  assert_eq "exact-clean: stale"    "$ST_STALE"    "false"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_exact_drift() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  ( cd "$SC_WS/proj" && echo more >> src/a.txt && git commit -qam second \
+    && echo uncommitted >> src/a.txt ) >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "exact-drift: drift"     "$ST_DRIFT"     "exact"
+  assert_eq "exact-drift: +1 коммит" "$ST_UNPACKED"  "1"
+  assert_eq "exact-drift: dirty=1"   "$ST_DIRTY_NOW" "1"
+  assert_eq "exact-drift: stale"     "$ST_STALE"     "true"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_heuristic() {
+  _mk_status_fixture
+  cmd_pack proj >/dev/null 2>&1
+  rm -f "$SC_WS/_dist/proj.meta"                       # меты нет → эвристика
+  touch -d '2000-01-01' "$SC_WS/_dist/proj.tar.gz"     # архив «старый»
+  load_config proj; status_collect proj
+  assert_eq "heuristic: drift" "$ST_DRIFT" "heuristic"
+  assert_eq "heuristic: stale (архив старее коммита)" "$ST_STALE" "true"
+  rm -rf "$SC_WS" "$SC_REG"
+}
+
+test_status_collect_nongit_and_noarchive() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"; echo x > "$ws/plainproj/f.txt"
+  load_config plainproj; status_collect plainproj
+  assert_eq "не-git: git=false"      "$ST_GIT"    "false"
+  assert_eq "не-git: branch пуст"    "$ST_BRANCH" ""
+  assert_eq "не-git: dirty=-1"       "$ST_DIRTY"  "-1"
+  assert_eq "нет архива: stale=true" "$ST_STALE"  "true"
+  assert_eq "нет архива: drift=none" "$ST_DRIFT"  "none"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_collect_orphan_repo() {
+  # живой кейс suba: git init без единого коммита
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/orph"; ( cd "$ws/orph" && git init -q . && echo x > f.txt && git add f.txt ) >/dev/null 2>&1
+  load_config orph
+  local rc=0
+  status_collect orph || rc=$?
+  assert_eq "orphan: не падает"   "$rc"      "0"
+  assert_eq "orphan: git=true"    "$ST_GIT"  "true"
+  assert_eq "orphan: ahead=-1"    "$ST_AHEAD" "-1"
+  rm -rf "$ws" "$reg"
+}
+
+test_status_collect_upstream_ahead() {
+  local base; base="$(make_ws)"; WORKSPACE="$base"; DIST_DIR="$base/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  git init -q --bare "$base/remote.git"
+  mkdir -p "$base/proj"
+  ( cd "$base/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git remote add origin "$base/remote.git" \
+    && echo a > f.txt && git add -A && git commit -qm one && git push -qu origin HEAD \
+    && echo b >> f.txt && git commit -qam two ) >/dev/null 2>&1
+  load_config proj; status_collect proj
+  assert_eq "upstream: ahead=1"  "$ST_AHEAD"  "1"
+  assert_eq "upstream: behind=0" "$ST_BEHIND" "0"
+  assert_has "upstream: имя"     "$ST_UPSTREAM" "origin/"
+  rm -rf "$base" "$reg"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -970,6 +1059,12 @@ test_pack_e2e_registry
 test_pack_writes_meta_git
 test_pack_writes_meta_nongit
 test_pack_meta_broken_git_best_effort
+test_status_collect_exact_clean
+test_status_collect_exact_drift
+test_status_collect_heuristic
+test_status_collect_nongit_and_noarchive
+test_status_collect_orphan_repo
+test_status_collect_upstream_ahead
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
