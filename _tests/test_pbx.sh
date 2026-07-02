@@ -869,6 +869,88 @@ test_snapshot_tree_orphan_src() {
   rm -rf "$src"
 }
 
+# --- Э2: push_snapshot / cmd_push (зеркало = локальный bare) -----------------------
+_mk_push_fixture() {
+  PU_BASE="$(make_ws)"
+  PU_SRC="$PU_BASE/src"; PU_MIRROR="$PU_BASE/mirror.git"
+  git init -q --bare "$PU_MIRROR"
+  mkdir -p "$PU_SRC"
+  ( cd "$PU_SRC" && git init -q . && git config user.email t@t && git config user.name t \
+    && echo v1 > f.txt && git add -A && git commit -qm init \
+    && echo v2-uncommitted >> f.txt ) >/dev/null 2>&1
+}
+
+test_push_snapshot_first_and_ff() {
+  _mk_push_fixture
+  local sha1 sha2
+  sha1="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-1" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha1"; then ok "push: первый снапшот запушен"; else bad "push: первый снапшот не SHA: '$sha1'"; fi
+  assert_has "push: ветка создана в зеркале" \
+    "$(git -C "$PU_MIRROR" branch --list 'feature/T-1')" "feature/T-1"
+  assert_has "push: незакоммиченная правка в снапшоте" \
+    "$(git -C "$PU_MIRROR" show "feature/T-1:f.txt")" "v2-uncommitted"
+  # второй снапшот с новой правкой — fast-forward (parent-chain), БЕЗ force
+  ( cd "$PU_SRC" && echo v3 >> f.txt ) >/dev/null 2>&1
+  sha2="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-1" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha2"; then ok "push: второй снапшот запушен"; else bad "push: второй не SHA"; fi
+  assert_has "push: parent-chain (первый — предок второго)" \
+    "$(git -C "$PU_MIRROR" rev-list "feature/T-1")" "$sha1"
+  rm -rf "$PU_BASE"
+}
+
+test_push_snapshot_no_changes() {
+  _mk_push_fixture
+  ( cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-2" proj ) >/dev/null 2>&1
+  local n_before; n_before="$(git -C "$PU_MIRROR" rev-list --count 'feature/T-2')"
+  local out rc=0
+  out="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-2" proj) 2>/dev/null )" || rc=$?
+  assert_eq "push: без изменений rc=0"        "$rc"  "0"
+  assert_eq "push: без изменений stdout пуст" "$out" ""
+  assert_eq "push: без изменений — новых коммитов в зеркале нет" \
+    "$(git -C "$PU_MIRROR" rev-list --count 'feature/T-2')" "$n_before"
+  rm -rf "$PU_BASE"
+}
+
+test_push_snapshot_concurrent_commit_survives() {
+  _mk_push_fixture
+  ( cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-3" proj ) >/dev/null 2>&1
+  # «конкурент» двигает ветку зеркала
+  local other; other="$(make_ws)"
+  git clone -q "$PU_MIRROR" "$other/clone" 2>/dev/null
+  ( cd "$other/clone" && git config user.email o@o && git config user.name o \
+    && git checkout -q feature/T-3 && echo alien > alien.txt && git add -A \
+    && git commit -qm alien && git push -q origin feature/T-3 ) >/dev/null 2>&1
+  # наш следующий снапшот должен пройти И сохранить чужой коммит достижимым
+  ( cd "$PU_SRC" && echo v4 >> f.txt ) >/dev/null 2>&1
+  local sha; sha="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-3" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha"; then ok "push: после чужого коммита прошёл"; else bad "push: не прошёл после чужого коммита"; fi
+  assert_has "push: чужой коммит достижим (не потерян)" \
+    "$(git -C "$PU_MIRROR" log --format=%s 'feature/T-3')" "alien"
+  rm -rf "$PU_BASE" "$other"
+}
+
+test_cmd_push_requires_mirror() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj"; ( cd "$ws/proj" && git init -q . ) >/dev/null 2>&1
+  local rc=0
+  ( cmd_push proj ) >/dev/null 2>&1 || rc=$?
+  assert_eq "cmd_push: без MIRROR → die" "$rc" "1"
+  rm -rf "$ws" "$reg"
+}
+
+test_cmd_push_default_branch_is_src_branch() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/T-55 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  assert_has "cmd_push: дефолт ветки = текущая ветка SRC" \
+    "$(git -C "$PU_MIRROR" branch --list 'feature/T-55')" "feature/T-55"
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -1314,6 +1396,11 @@ test_load_config_mirror
 test_snapshot_tree_contents
 test_snapshot_tree_src_untouched
 test_snapshot_tree_orphan_src
+test_push_snapshot_first_and_ff
+test_push_snapshot_no_changes
+test_push_snapshot_concurrent_commit_survives
+test_cmd_push_requires_mirror
+test_cmd_push_default_branch_is_src_branch
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo

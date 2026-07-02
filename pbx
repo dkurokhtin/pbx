@@ -582,6 +582,100 @@ snapshot_tree() {
   return 0
 }
 
+# push_snapshot <SRC> <MIRROR> <ветка> <проект>
+# Снапшот-коммит с parent-chain [tip ветки зеркала (fetch→FETCH_HEAD), SRC HEAD]
+# → push БЕЗ --force (fast-forward по построению). Гонка → штатный отказ git →
+# bounded retry (3). Пустой снапшот (дерево == дереву tip) → rc=0, stdout пуст.
+# MIRROR — сырой URL/путь: git remote в SRC НЕ регистрируем (.git/config чист).
+push_snapshot() {
+  local src="$1" mirror="$2" branch="$3" project="${4:-project}"
+  [[ -e "$src/.git" ]] || { c_warn "push: не git-репозиторий: $src"; return 1; }
+
+  local tree
+  tree="$(snapshot_tree "$src")" || return 1
+  _pbx_is_sha "$tree" || { c_warn "push: битое дерево — отмена, ничего не пушу"; return 1; }
+
+  local src_head orig_branch
+  src_head="$(git -C "$src" rev-parse -q --verify HEAD 2>/dev/null || true)"
+  orig_branch="$(git -C "$src" branch --show-current 2>/dev/null || true)"
+  [[ -n "$orig_branch" ]] || orig_branch="(detached)"
+
+  local attempt max_attempts=3
+  for attempt in $(seq 1 "$max_attempts"); do
+    # tip ветки зеркала: fetch (не ls-remote — объект нужен локально для -p);
+    # FETCH_HEAD — служебный файл, постоянных refs в SRC не остаётся.
+    local remote_tip=""
+    if GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$src" fetch -q "$mirror" "$branch" 2>/dev/null; then
+      remote_tip="$(git -C "$src" rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+    fi
+
+    # пустой снапшот: дерево не отличается от дерева tip — пушить нечего
+    if _pbx_is_sha "$remote_tip"; then
+      local remote_tree
+      remote_tree="$(git -C "$src" rev-parse -q --verify "$remote_tip^{tree}" 2>/dev/null || true)"
+      if [[ "$remote_tree" == "$tree" ]]; then
+        c_warn "push: изменений нет — снапшот совпадает с '$branch' на зеркале."
+        return 0
+      fi
+    fi
+
+    local -a parent_args=()
+    _pbx_is_sha "$remote_tip" && parent_args+=(-p "$remote_tip")
+    _pbx_is_sha "$src_head"   && parent_args+=(-p "$src_head")
+    # без единого parent — валидный root-коммит (свежий SRC без коммитов)
+
+    local msg commit_sha
+    msg="$(printf 'pbx push: снапшот %s\n\nsource-branch: %s\nsource-commit: %s\nmirror-parent: %s\n' \
+      "$project" "$orig_branch" "${src_head:-—}" "${remote_tip:-—}")"
+    if ! commit_sha="$(git -C "$src" commit-tree "$tree" ${parent_args[@]+"${parent_args[@]}"} -m "$msg" 2>&1)"; then
+      c_warn "push: commit-tree не удался: $commit_sha"
+      return 1
+    fi
+    # КРИТИЧНО: пустой src-ref в refspec = УДАЛЕНИЕ ветки на remote.
+    if ! _pbx_is_sha "$commit_sha"; then
+      c_warn "push: commit-tree вернул не SHA ('$commit_sha') — отмена (пуш пустого ref удалил бы ветку!)"
+      return 1
+    fi
+
+    local out
+    if out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$src" push "$mirror" "$commit_sha:refs/heads/$branch" 2>&1)"; then
+      printf '%s\n' "$commit_sha"
+      return 0
+    fi
+    c_warn "push: попытка $attempt/$max_attempts отклонена (гонка на зеркале?):"
+    printf '%s\n' "$out" >&2
+  done
+  c_warn "push: не удалось за $max_attempts попыток"
+  return 1
+}
+
+cmd_push() {
+  local project; project="$(strip_cr "${1:?Использование: pbx push <проект> [ветка]}")"
+  PBX_CURRENT_PROJECT="$project"
+  valid_project "$project"
+  load_config "$project"
+  [[ -e "$SRC/.git" ]] || die "SRC не git-репозиторий: $SRC"
+  [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project'. Добавь MIRROR=git@github.com:<user>/<repo>.git в $PBX_REGISTRY_DIR/$project.conf"
+
+  local branch; branch="$(strip_cr "${2:-}")"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$SRC" branch --show-current 2>/dev/null || true)"
+    [[ -n "$branch" ]] || die "Не удалось определить текущую ветку SRC — укажи ветку явно: pbx push $project <ветка>"
+  fi
+
+  ui_section "Push $project → зеркало" "🔵 Push $project → $MIRROR ($branch)"
+  ui_kv MIRROR "$MIRROR"
+  ui_kv BRANCH "$branch"
+  local sha
+  sha="$(push_snapshot "$SRC" "$MIRROR" "$branch" "$project")" || die "pbx push не удался (см. вывод выше)"
+  if [[ -z "$sha" ]]; then
+    return 0   # «изменений нет» — push_snapshot уже сообщил
+  fi
+  c_green "✅ $project: снапшот рабочего дерева ушёл в зеркало веткой '$branch' (${sha:0:7})"
+  ui_summary "$branch" "$MIRROR" "снапшот ${sha:0:7} (вкл. незакоммиченное)"
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
@@ -839,6 +933,7 @@ cmd_add() {
 # Реестр pbx: проект $name
 SRC=$src
 # REPO=/root/$name       # цель доставки (иначе \$PROJECTS_ROOT/$name)
+# MIRROR=git@github.com:<user>/$name.git   # личное зеркало для pbx push/deliver --mirror
 # BASE_BRANCH=dev
 # TARGET_BRANCH=dev      # master-MR обычно вручную перед релизом
 # FORGE=gitlab           # gitlab | github | none
@@ -914,6 +1009,7 @@ cmd_help() {
 pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
+  pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
@@ -959,6 +1055,7 @@ ${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
 
 ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
+  ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
   ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
@@ -1254,6 +1351,7 @@ main() {
   local cmd="$1"; shift || true
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
+    push)               require_wsl; cmd_push "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
