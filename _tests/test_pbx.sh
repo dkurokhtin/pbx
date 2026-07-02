@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (9) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (10) завершает без действий
   local rc=0
-  ( printf '9\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (9) → rc=0" "$rc" "0"
+  ( printf '10\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (10) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -433,9 +433,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 4 = status → вывод → Enter (menu_pause) → 9 = выход
+  # 5 = status → вывод → Enter (menu_pause) → 10 = выход
   local out
-  out="$( ( printf '4\n\n9\n' | {
+  out="$( ( printf '5\n\n10\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -445,6 +445,23 @@ test_menu_status_returns_to_menu() {
   assert_eq "меню: после status снова меню" \
     "$(printf '%s' "$out" | grep -c 'что делаем')" "2"
   rm -rf "$ws" "$reg"
+}
+
+test_menu_push_flow() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/T-77 ) >/dev/null 2>&1
+  # 2 = push → 1 = проект → Enter на ветке (дефолт: текущая ветка SRC)
+  ( printf '2\n1\n\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) >/dev/null 2>&1 || true
+  assert_has "меню: push создал ветку в зеркале" \
+    "$(git -C "$PU_MIRROR" branch --list 'feature/T-77')" "feature/T-77"
+  rm -rf "$PU_BASE" "$ws" "$reg"
 }
 
 # --- Guard достижим и fail-closed из меню (доставка через меню, вход-пайп) ------
@@ -462,8 +479,8 @@ test_menu_deliver_guard_fail_closed() {
   tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
   printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
   local out rc=0
-  # 2=deliver → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
-  out="$( ( printf '2\n1\nfeature/T-77\nmsg\n' | {
+  # 3=deliver → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
+  out="$( ( printf '3\n1\nfeature/T-77\nmsg\n' | {
       source "$PBX"
       WORKSPACE="$base/ws-empty"; mkdir -p "$WORKSPACE"
       DIST_DIR="$dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
@@ -748,6 +765,238 @@ test_pad_helpers_multibyte() {
   assert_eq "padr: правое выравнивание" "$out" "  5|"
 }
 
+# --- Э2: pathspec-исключения, SHA-валидация, MIRROR ------------------------------
+test_pack_exclude_pathspecs_forms() {
+  EXTRA_PACK_EXCLUDES=()
+  local out; out="$(pack_exclude_pathspecs)"
+  assert_has "pathspec: длинная форма node_modules"    "$out" ":(glob,exclude)**/node_modules"
+  assert_has "pathspec: содержимое node_modules"       "$out" ":(glob,exclude)**/node_modules/**"
+  assert_has "pathspec: __pycache__ длинной формой"    "$out" ":(glob,exclude)**/__pycache__"
+  assert_no  "pathspec: .git не эмитится"              "$out" "**/.git"
+  assert_no  "pathspec: короткой формы :! нет"         "$out" ":!"
+}
+
+test_pack_exclude_pathspecs_extra() {
+  EXTRA_PACK_EXCLUDES=("dist")
+  local out; out="$(pack_exclude_pathspecs)"
+  assert_has "pathspec: EXTRA dist"            "$out" ":(glob,exclude)**/dist"
+  assert_has "pathspec: EXTRA dist содержимое" "$out" ":(glob,exclude)**/dist/**"
+  EXTRA_PACK_EXCLUDES=()
+}
+
+test_pbx_is_sha() {
+  local rc=0
+  _pbx_is_sha "0123456789abcdef0123456789abcdef01234567" || rc=$?
+  assert_eq "sha: валидный 40-hex → 0" "$rc" "0"
+  rc=0; _pbx_is_sha "" || rc=$?
+  assert_eq "sha: пустая строка → 1" "$rc" "1"
+  rc=0; _pbx_is_sha "abc" || rc=$?
+  assert_eq "sha: короткая → 1" "$rc" "1"
+  rc=0; _pbx_is_sha "0123456789ABCDEF0123456789abcdef01234567" || rc=$?
+  assert_eq "sha: верхний регистр → 1" "$rc" "1"
+}
+
+test_load_config_mirror() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_MIRROR
+  mkdir -p "$ws/proj"
+  printf 'MIRROR=git@github.com:me/proj.git\r\n' > "$reg/proj.conf"   # с CRLF
+  load_config proj
+  assert_eq "MIRROR из реестра, без CR" "$MIRROR" "git@github.com:me/proj.git"
+  PBX_MIRROR="https://x/y.git" load_config proj
+  assert_eq "env PBX_MIRROR побеждает" "$MIRROR" "https://x/y.git"
+  unset PBX_MIRROR
+  load_config nonexistent-proj-xyz
+  assert_eq "MIRROR дефолт — пусто" "$MIRROR" ""
+  rm -rf "$ws" "$reg"
+}
+
+# --- Э2: snapshot_tree -------------------------------------------------------------
+# Фикстура: git-репо с .gitignore(*.log), staged+unstaged+untracked правками,
+# вложенным node_modules, tracked-но-ignored файлом с правкой (реальный кейс).
+_mk_snapshot_fixture() {
+  SN_SRC="$(make_ws)"
+  ( cd "$SN_SRC" \
+    && git init -q . && git config user.email t@t && git config user.name t \
+    && printf '*.log\n' > .gitignore \
+    && mkdir -p app sub/nested/node_modules/pkg node_modules/x .claude \
+    && echo base > tracked.txt && echo code > app/main.py \
+    && echo old > important.log && git add -f important.log \
+    && echo ctx > CLAUDE.md && echo s > .claude/cfg \
+    && echo junk1 > node_modules/x/j.js && echo junk2 > sub/nested/node_modules/pkg/j.js \
+    && git add .gitignore tracked.txt app/main.py \
+    && git commit -qm init \
+    && echo staged >> tracked.txt && git add tracked.txt \
+    && echo unstaged >> app/main.py \
+    && echo brandnew > sub/nested/new.txt \
+    && echo edited >> important.log \
+    && echo noise > debug.log ) >/dev/null 2>&1
+}
+
+test_snapshot_tree_contents() {
+  _mk_snapshot_fixture
+  local tree; tree="$(cd "$SN_SRC" && snapshot_tree "$SN_SRC")"
+  local rc=$?; assert_eq "snapshot: rc=0" "$rc" "0"
+  local files; files="$(git -C "$SN_SRC" ls-tree -r --name-only "$tree")"
+  assert_has "snapshot: staged-правка"        "$files" "tracked.txt"
+  assert_has "snapshot: unstaged-файл"        "$files" "app/main.py"
+  assert_has "snapshot: untracked-файл"       "$files" "sub/nested/new.txt"
+  assert_has "snapshot: tracked-но-ignored"   "$files" "important.log"
+  assert_no  "snapshot: без node_modules"     "$files" "node_modules"
+  assert_no  "snapshot: без CLAUDE.md"        "$files" "CLAUDE.md"
+  assert_no  "snapshot: без .claude"          "$files" ".claude"
+  assert_no  "snapshot: gitignored untracked отфильтрован" "$files" "debug.log"
+  # содержимое, не только имена: правки реально в дереве
+  assert_has "snapshot: правка staged в дереве" \
+    "$(git -C "$SN_SRC" cat-file -p "$tree:tracked.txt")" "staged"
+  assert_has "snapshot: правка tracked-ignored в дереве" \
+    "$(git -C "$SN_SRC" cat-file -p "$tree:important.log")" "edited"
+  rm -rf "$SN_SRC"
+}
+
+test_snapshot_tree_src_untouched() {
+  _mk_snapshot_fixture
+  local head0 status0 index_before
+  head0="$(git -C "$SN_SRC" rev-parse HEAD)"
+  status0="$(git -C "$SN_SRC" status --porcelain)"   # status может освежить index (racy-git) — снимаем копию ПОСЛЕ него
+  index_before="$(make_ws)/index.bin"
+  cp "$SN_SRC/.git/index" "$index_before"
+  snapshot_tree "$SN_SRC" >/dev/null
+  # cmp — ПЕРВЫМ (до любых git status, которые сами трогают index)
+  if cmp -s "$index_before" "$SN_SRC/.git/index"; then
+    ok "SRC: .git/index байт-в-байт прежний"
+  else
+    bad "SRC: .git/index ИЗМЕНЁН"
+  fi
+  assert_eq "SRC: HEAD не тронут"   "$(git -C "$SN_SRC" rev-parse HEAD)" "$head0"
+  assert_eq "SRC: status не тронут" "$(git -C "$SN_SRC" status --porcelain)" "$status0"
+  assert_eq "SRC: stash пуст" "$(git -C "$SN_SRC" stash list)" ""
+  rm -rf "$SN_SRC" "$(dirname "$index_before")"
+}
+
+test_snapshot_tree_orphan_src() {
+  local src; src="$(make_ws)"
+  ( cd "$src" && git init -q . && echo x > f.txt ) >/dev/null 2>&1
+  local tree rc=0
+  tree="$( (cd "$src" && snapshot_tree "$src") )" || rc=$?
+  assert_eq "orphan SRC: rc=0" "$rc" "0"
+  assert_has "orphan SRC: файл в дереве" \
+    "$(git -C "$src" ls-tree -r --name-only "$tree")" "f.txt"
+  rm -rf "$src"
+}
+
+test_snapshot_tree_tracked_excluded_dropped() {
+  # I1: закоммиченные excluded-файлы НЕ должны попадать в снапшот
+  local src; src="$(make_ws)"
+  ( cd "$src" && git init -q . && git config user.email t@t && git config user.name t \
+    && printf '*.log\n' > .gitignore \
+    && mkdir -p node_modules/pkg __pycache__ \
+    && echo ctx > CLAUDE.md && echo conf > .pbx.conf \
+    && echo junk > node_modules/pkg/keep.js && echo pyc > app.pyc && echo c > __pycache__/x.txt \
+    && echo real > app.js \
+    && echo old > important.log && git add -f important.log \
+    && git add -A -- . ':(glob,exclude)нет-такого' \
+    && git add -f CLAUDE.md .pbx.conf node_modules/pkg/keep.js app.pyc __pycache__/x.txt \
+    && git commit -qm init \
+    && echo edited >> important.log ) >/dev/null 2>&1
+  local tree; tree="$(cd "$src" && snapshot_tree "$src")"
+  local files; files="$(git -C "$src" ls-tree -r --name-only "$tree")"
+  assert_no  "tracked-excluded: CLAUDE.md выброшен"     "$files" "CLAUDE.md"
+  assert_no  "tracked-excluded: .pbx.conf выброшен"     "$files" ".pbx.conf"
+  assert_no  "tracked-excluded: node_modules выброшен"  "$files" "node_modules"
+  assert_no  "tracked-excluded: *.pyc выброшен"         "$files" "app.pyc"
+  assert_no  "tracked-excluded: __pycache__ выброшен"   "$files" "__pycache__"
+  assert_has "tracked-excluded: обычный файл на месте"  "$files" "app.js"
+  # регресс грабли №2: tracked-ignored с правкой ПО-ПРЕЖНЕМУ в снапшоте
+  assert_has "tracked-excluded: important.log цел (грабля №2 не сломана)" "$files" "important.log"
+  assert_has "tracked-excluded: правка important.log в дереве" \
+    "$(git -C "$src" cat-file -p "$tree:important.log")" "edited"
+  rm -rf "$src"
+}
+
+# --- Э2: push_snapshot / cmd_push (зеркало = локальный bare) -----------------------
+_mk_push_fixture() {
+  PU_BASE="$(make_ws)"
+  PU_SRC="$PU_BASE/src"; PU_MIRROR="$PU_BASE/mirror.git"
+  git init -q --bare "$PU_MIRROR"
+  mkdir -p "$PU_SRC"
+  ( cd "$PU_SRC" && git init -q . && git config user.email t@t && git config user.name t \
+    && echo v1 > f.txt && git add -A && git commit -qm init \
+    && echo v2-uncommitted >> f.txt ) >/dev/null 2>&1
+}
+
+test_push_snapshot_first_and_ff() {
+  _mk_push_fixture
+  local sha1 sha2
+  sha1="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-1" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha1"; then ok "push: первый снапшот запушен"; else bad "push: первый снапшот не SHA: '$sha1'"; fi
+  assert_has "push: ветка создана в зеркале" \
+    "$(git -C "$PU_MIRROR" branch --list 'feature/T-1')" "feature/T-1"
+  assert_has "push: незакоммиченная правка в снапшоте" \
+    "$(git -C "$PU_MIRROR" show "feature/T-1:f.txt")" "v2-uncommitted"
+  # второй снапшот с новой правкой — fast-forward (parent-chain), БЕЗ force
+  ( cd "$PU_SRC" && echo v3 >> f.txt ) >/dev/null 2>&1
+  sha2="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-1" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha2"; then ok "push: второй снапшот запушен"; else bad "push: второй не SHA"; fi
+  assert_has "push: parent-chain (первый — предок второго)" \
+    "$(git -C "$PU_MIRROR" rev-list "feature/T-1")" "$sha1"
+  rm -rf "$PU_BASE"
+}
+
+test_push_snapshot_no_changes() {
+  _mk_push_fixture
+  ( cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-2" proj ) >/dev/null 2>&1
+  local n_before; n_before="$(git -C "$PU_MIRROR" rev-list --count 'feature/T-2')"
+  local out rc=0
+  out="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-2" proj) 2>/dev/null )" || rc=$?
+  assert_eq "push: без изменений rc=0"        "$rc"  "0"
+  assert_eq "push: без изменений stdout пуст" "$out" ""
+  assert_eq "push: без изменений — новых коммитов в зеркале нет" \
+    "$(git -C "$PU_MIRROR" rev-list --count 'feature/T-2')" "$n_before"
+  rm -rf "$PU_BASE"
+}
+
+test_push_snapshot_concurrent_commit_survives() {
+  _mk_push_fixture
+  ( cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-3" proj ) >/dev/null 2>&1
+  # «конкурент» двигает ветку зеркала
+  local other; other="$(make_ws)"
+  git clone -q "$PU_MIRROR" "$other/clone" 2>/dev/null
+  ( cd "$other/clone" && git config user.email o@o && git config user.name o \
+    && git checkout -q feature/T-3 && echo alien > alien.txt && git add -A \
+    && git commit -qm alien && git push -q origin feature/T-3 ) >/dev/null 2>&1
+  # наш следующий снапшот должен пройти И сохранить чужой коммит достижимым
+  ( cd "$PU_SRC" && echo v4 >> f.txt ) >/dev/null 2>&1
+  local sha; sha="$( (cd "$PU_SRC" && push_snapshot "$PU_SRC" "$PU_MIRROR" "feature/T-3" proj) 2>/dev/null )"
+  if _pbx_is_sha "$sha"; then ok "push: после чужого коммита прошёл"; else bad "push: не прошёл после чужого коммита"; fi
+  assert_has "push: чужой коммит достижим (не потерян)" \
+    "$(git -C "$PU_MIRROR" log --format=%s 'feature/T-3')" "alien"
+  rm -rf "$PU_BASE" "$other"
+}
+
+test_cmd_push_requires_mirror() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj"; ( cd "$ws/proj" && git init -q . ) >/dev/null 2>&1
+  local rc=0
+  ( cmd_push proj ) >/dev/null 2>&1 || rc=$?
+  assert_eq "cmd_push: без MIRROR → die" "$rc" "1"
+  rm -rf "$ws" "$reg"
+}
+
+test_cmd_push_default_branch_is_src_branch() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/T-55 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  assert_has "cmd_push: дефолт ветки = текущая ветка SRC" \
+    "$(git -C "$PU_MIRROR" branch --list 'feature/T-55')" "feature/T-55"
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
 # --- Task 4: scan/log апгрейды (ветка кандидата, upstream+мета) -------
 test_scan_plain_no_branch_tail() {
   local ws; ws="$(make_ws)"; local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
@@ -884,6 +1133,73 @@ test_deliver_guard_plain_invariant() {
   assert_has "guard plain: имя удаляемого файла" "$out" "- roles.txt"
   assert_no  "guard plain: без ANSI"             "$out" $'\033'
   cd "$HERE"; rm -rf "$base" "$reg"
+}
+
+# --- Э2: deliver --mirror ------------------------------------------------------------
+_mk_mirror_deliver_fixture() {
+  MD_BASE="$(make_ws)"
+  MD_REMOTE="$MD_BASE/gitlab.git"; MD_MIRROR="$MD_BASE/mirror.git"
+  MD_REPO="$MD_BASE/repo"; MD_SRC="$MD_BASE/src"
+  MD_REG="$(make_ws)"; PBX_REGISTRY_DIR="$MD_REG"
+  DIST_DIR="$MD_BASE/_dist"; mkdir -p "$DIST_DIR"
+  git init -q --bare "$MD_REMOTE"; git init -q --bare "$MD_MIRROR"
+  git init -q "$MD_REPO"
+  ( cd "$MD_REPO" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$MD_REMOTE" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt && echo ci > .gitlab-ci.yml \
+    && git add -A && git commit -qm init && git push -qu origin dev ) >/dev/null 2>&1
+  # SRC: правка file.txt, УДАЛЕНИЕ roles.txt, новый new.txt (+ незакоммиченное)
+  mkdir -p "$MD_SRC"
+  ( cd "$MD_SRC" && git init -q . && git config user.email t@t && git config user.name t \
+    && echo changed > file.txt && echo fresh > new.txt \
+    && git add -A && git commit -qm snap \
+    && echo more >> new.txt ) >/dev/null 2>&1
+  ( cd "$MD_SRC" && push_snapshot "$MD_SRC" "$MD_MIRROR" "feature/M-1" proj ) >/dev/null 2>&1
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$MD_SRC" "$MD_REPO" "$MD_MIRROR" > "$MD_REG/proj.conf"
+}
+
+test_deliver_mirror_e2e() {
+  _mk_mirror_deliver_fixture
+  ( cmd_deliver proj "feature/M-1" "mirror-доставка" --mirror --yes </dev/null ) >/dev/null 2>&1
+  assert_eq  "mirror-deliver: правка доехала"    "$(cat "$MD_REPO/file.txt")" "changed"
+  assert_has "mirror-deliver: новый файл доехал (с незакоммиченным)" "$(cat "$MD_REPO/new.txt")" "more"
+  [[ -f "$MD_REPO/roles.txt" ]] && bad "mirror-deliver: удаление НЕ отражено" || ok "mirror-deliver: удаление отражено"
+  assert_eq  "mirror-deliver: .gitlab-ci.yml жив (sync-exclude)" "$(cat "$MD_REPO/.gitlab-ci.yml")" "ci"
+  assert_has "mirror-deliver: ветка запушена" \
+    "$(git -C "$MD_REMOTE" branch --list 'feature/M-1')" "feature/M-1"
+  cd "$HERE"; rm -rf "$MD_BASE" "$MD_REG"
+}
+
+test_deliver_mirror_guard_fail_closed() {
+  _mk_mirror_deliver_fixture
+  local rc=0
+  ( cmd_deliver proj "feature/M-2" "msg" --mirror </dev/null ) >/dev/null 2>&1 || rc=$?
+  # снапшот удаляет roles.txt → guard обязан прервать без --yes в non-TTY
+  assert_eq "mirror-guard: прерывание без --yes (rc=1)" "$rc" "1"
+  assert_eq "mirror-guard: ветка НЕ запушена" \
+    "$(git -C "$MD_REMOTE" branch --list 'feature/M-2')" ""
+  cd "$HERE"; rm -rf "$MD_BASE" "$MD_REG"
+}
+
+test_deliver_mirror_requires_mirror_conf() {
+  local base; base="$(make_ws)"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  git init -q "$base/repo"
+  printf 'SRC=%s\nREPO=%s\nFORGE=none\n' "$base/src" "$base/repo" > "$reg/proj.conf"
+  local rc=0
+  ( cmd_deliver proj "feature/M-3" "msg" --mirror --yes </dev/null ) >/dev/null 2>&1 || rc=$?
+  assert_eq "mirror-deliver: без MIRROR → die" "$rc" "1"
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
+test_deliver_archive_path_regression() {
+  # архивный путь БЕЗ --mirror работает как раньше (существующий
+  # test_deliver_uses_repo остаётся главным регрессом; этот — smoke, что
+  # флаг --mirror не влияет на разбор прочих аргументов)
+  local rc=0
+  ( cmd_deliver ) >/dev/null 2>&1 || rc=$?
+  assert_eq "deliver без аргументов по-прежнему ошибка использования" "$rc" "1"
 }
 
 # --- log: диагностика для ИИ-агента -----------------------------------------
@@ -1164,6 +1480,7 @@ test_menu_exit_item
 test_menu_pack_e2e
 test_menu_cancel_returns_cleanly
 test_menu_status_returns_to_menu
+test_menu_push_flow
 test_menu_deliver_guard_fail_closed
 test_ui_raw_off_idempotent
 test_pack_excludes
@@ -1186,11 +1503,28 @@ test_status_json_sentinels_nongit
 test_status_table_pipe_no_ansi
 test_status_unknown_project_dies
 test_pad_helpers_multibyte
+test_pack_exclude_pathspecs_forms
+test_pack_exclude_pathspecs_extra
+test_pbx_is_sha
+test_load_config_mirror
+test_snapshot_tree_contents
+test_snapshot_tree_src_untouched
+test_snapshot_tree_orphan_src
+test_snapshot_tree_tracked_excluded_dropped
+test_push_snapshot_first_and_ff
+test_push_snapshot_no_changes
+test_push_snapshot_concurrent_commit_survives
+test_cmd_push_requires_mirror
+test_cmd_push_default_branch_is_src_branch
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
+test_deliver_mirror_e2e
+test_deliver_mirror_guard_fail_closed
+test_deliver_mirror_requires_mirror_conf
+test_deliver_archive_path_regression
 test_log_reports_project
 test_log_no_project
 test_log_survives_unwritable_dist

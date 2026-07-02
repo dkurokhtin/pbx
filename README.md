@@ -71,6 +71,23 @@ Enter — выбрать, Esc/q — отмена. Пункты pack/deliver/log 
 время упаковки) — по нему `status` считает дрейф точно, по коммитам; без
 манифеста дрейф оценивается эвристикой (помечается `~`).
 
+## Транспорт через личное GitHub-зеркало
+
+Вместо ручного переноса архива: дома `pbx push <проект> [ветка]` — снапшот
+рабочего дерева SRC (включая незакоммиченное) уезжает коммитом в ветку личного
+зеркала (ключ `MIRROR=` в реестре). На ноуте `pbx deliver <проект> <ветка>
+<сообщение> --mirror` — та же доставка с тем же guard, но источник — ветка
+зеркала, а не архив. Архивный путь никуда не делся — работает без `--mirror`.
+
+Отличие от pack: снапшот уважает `.gitignore` SRC — gitignored-файлы
+(например `.env`) в зеркало НЕ уезжают (архив их тащил). История снапшотов в
+зеркале сохраняется (parent-chain), `--force` не используется.
+
+Auth ноута (root): рекомендован HTTPS + fine-grained PAT (скоуп — только
+зеркала, Contents Read/Write, срок ~90 дней) через `git credential-cache`
+или `~/.git-credentials` (600). Токен НЕ вписывать в URL реестра. При
+отсутствии/протухании токена pbx падает с понятной ошибкой, не виснет.
+
 ## Рабочий процесс
 
     # рабочая машина
@@ -124,7 +141,7 @@ Changes перед мержем**; удаления файлов, которых
 ## Переменные окружения
 
     PBX_WORKSPACE  PBX_PROJECTS_ROOT  PBX_DIST_DIR  PBX_REGISTRY_DIR
-    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_FORGE  PBX_IGNORE_DIRS  PBX_ASSUME_YES  PBX_NO_MENU
+    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_FORGE  PBX_IGNORE_DIRS  PBX_ASSUME_YES  PBX_NO_MENU  PBX_MIRROR
 
 ## FORGE
 
