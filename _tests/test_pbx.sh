@@ -28,6 +28,45 @@ mk_repo() { git init -q "$1"; git -C "$1" remote add origin "$2"; }
 mk_container() { git init -q "$1"; }
 
 # --- Task 1 -----------------------------------------------------------------
+# --- UI: гейт цвета и глифы ---------------------------------------------------
+test_color_gated_in_pipe() {
+  # stdout не TTY → ANSI-кодов быть не должно ни на stdout, ни на stderr
+  local reg; reg="$(make_ws)"
+  local out; out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" list 2>&1)"
+  assert_no "пайп: нет ANSI-кодов в list" "$out" $'\033'
+  local err; err="$(bash "$PBX" nosuchcmd 2>&1 >/dev/null)" || true
+  assert_no "пайп: нет ANSI-кодов на stderr (неизвестная команда)" "$err" $'\033'
+  rm -rf "$reg"
+}
+
+test_ui_flags_nontty() {
+  local out   # 2>/dev/null: при ручном запуске stderr — TTY, иначе UI_COLOR_ERR=1
+  out="$(bash -c 'source "'"$PBX"'"; printf "%s %s %s" "$UI_COLOR_OUT" "$UI_COLOR_ERR" "$UI_TTY"' 2>/dev/null)"
+  assert_eq "non-TTY: все UI-флаги нули" "$out" "0 0 0"
+}
+
+test_glyphs_ascii_fallback() {
+  local g
+  g="$(LC_ALL=C bash -c 'source "'"$PBX"'"; printf "%s%s%s" "$G_PTR" "$G_OK" "$G_BAR"')"
+  assert_eq "LC_ALL=C: ASCII-глифы" "$g" ">*|"
+  if locale -a 2>/dev/null | grep -qi 'C.UTF-8\|C.utf8'; then
+    g="$(LC_ALL=C.UTF-8 bash -c 'source "'"$PBX"'"; printf "%s" "$G_PTR"')"
+    assert_eq "UTF-8: юникод-глиф курсора" "$g" "▸"
+  fi
+}
+
+test_c_funcs_respect_flags() {
+  # механизм гейта: c_* красят строго по UI_COLOR_* (TTY в CI не эмулируем,
+  # поэтому проверяем сам рычаг, форсируя флаги)
+  local out
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; c_blue hi')"
+  assert_has "UI_COLOR_OUT=1 → c_blue с ANSI" "$out" $'\033[34m'
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=0; c_blue hi')"
+  assert_eq  "UI_COLOR_OUT=0 → c_blue без ANSI" "$out" "hi"
+  out="$(bash -c 'source "'"$PBX"'"; UI_COLOR_ERR=1; c_warn hi' 2>&1 >/dev/null)"
+  assert_has "UI_COLOR_ERR=1 → c_warn с ANSI"  "$out" $'\033[33m'
+}
+
 test_source_no_run() {
   local out; out="$(bash -c 'source "'"$PBX"'"' 2>&1)"
   assert_eq "source не запускает main (пустой вывод)" "$out" ""
@@ -636,6 +675,10 @@ test_scan_no_descend_into_repo() {
 }
 
 test_source_no_run
+test_color_gated_in_pipe
+test_ui_flags_nontty
+test_glyphs_ascii_fallback
+test_c_funcs_respect_flags
 test_repo_remote_url
 test_scan_whole_repo
 test_scan_container_one
