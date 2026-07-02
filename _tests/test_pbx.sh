@@ -1594,6 +1594,19 @@ test_corp_collect_state_detached_and_merge() {
   rm -rf "$CE_BASE"
 }
 
+test_corp_collect_state_branch_cap() {
+  _mk_corp_fixture
+  # 35 доп. remote-веток: total считает все (35 + AAA + BBB + local-only CCC = 38),
+  # в список попадают только 30 самых свежих (cap head -30, регресс SIGPIPE-фикса)
+  ( cd "$CE_REPO" \
+    && for i in $(seq 1 35); do git branch "feature/CAP-$i" >/dev/null; done \
+    && git push -q origin $(for i in $(seq 1 35); do printf 'refs/heads/feature/CAP-%s:refs/heads/feature/CAP-%s ' "$i" "$i"; done) ) >/dev/null 2>&1
+  corp_collect_state "$CE_REPO" dev
+  assert_eq "cap: branches_total считает все ветки" "$CS_BRANCHES_TOTAL" "38"
+  assert_eq "cap: в списке ровно 30 строк" "$(printf '%s' "$CS_BRANCHES" | grep -c .)" "30"
+  rm -rf "$CE_BASE"
+}
+
 test_corp_state_files_json_valid() {
   _mk_corp_fixture
   # гадкий сабжект: таб + кавычки + % + бэкслеш + кириллица
@@ -2045,6 +2058,7 @@ test_corp_collect_state_branches
 test_corp_collect_state_no_base
 test_corp_collect_state_fetch_fail
 test_corp_collect_state_detached_and_merge
+test_corp_collect_state_branch_cap
 test_corp_state_files_json_valid
 test_snapshot_creates_state_no_leak
 test_snapshot_second_is_fast_forward

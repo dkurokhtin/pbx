@@ -887,7 +887,7 @@ corp_collect_state() {
   fi
   CS_BRANCHES_TOTAL="$(printf '%s' "$merged" | grep -c . || true)"
   local capped
-  capped="$(printf '%s' "$merged" | head -30)"
+  capped="$(printf '%s' "$merged" | head -30 || true)"
 
   local name where sha7 cdu cds ref behind ahead shortstat lr
   while IFS=$'\t' read -r name where sha7 cdu cds || [[ -n "$name" ]]; do
