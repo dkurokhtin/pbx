@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (10) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (12) завершает без действий
   local rc=0
-  ( printf '10\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (10) → rc=0" "$rc" "0"
+  ( printf '12\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (12) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -433,9 +433,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 5 = status → вывод → Enter (menu_pause) → 10 = выход
+  # 7 = status → вывод → Enter (menu_pause) → 12 = выход
   local out
-  out="$( ( printf '5\n\n10\n' | {
+  out="$( ( printf '7\n\n12\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -1883,6 +1883,64 @@ test_cmd_corp_cli_dispatch_and_help() {
   rm -rf "$CE_BASE" "$SN_REG" "$ws"
 }
 
+# --- Э3: status с MIRROR/push-инфо; меню snapshot/corp ---------------------------
+test_status_json_mirror_and_push_keys() {
+  _mk_push_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
+  ( cd "$PU_SRC" && git checkout -qb feature/S-1 ) >/dev/null 2>&1
+  ( cmd_push proj ) >/dev/null 2>&1
+  local out; out="$(cmd_status proj --json 2>/dev/null)"
+  assert_has "status json: mirror"      "$out" "\"mirror\":\"$PU_MIRROR\""
+  assert_has "status json: push_branch" "$out" '"push_branch":"feature/S-1"'
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+      ok "status json: валиден с новыми ключами"
+    else
+      bad "status json: НЕ валиден"
+    fi
+  fi
+  rm -rf "$PU_BASE" "$ws" "$reg"
+}
+
+test_status_json_mirror_sentinels() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/plainproj"
+  local out; out="$(cmd_status plainproj --json 2>/dev/null)"
+  assert_has "status json: mirror \"\""     "$out" '"mirror":""'
+  assert_has "status json: pushed_at -1"    "$out" '"pushed_at":-1'
+  rm -rf "$ws" "$reg"
+}
+
+test_menu_snapshot_runs_and_exits() {
+  # 4 = snapshot: пишущая команда — прогон и выход из меню
+  local ws reg out rc=0; ws="$(make_ws)"; reg="$(make_ws)"
+  out="$( ( printf '4\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || rc=$?
+  assert_has "меню: snapshot вызван"           "$out" "Снимок корп-состояния"
+  assert_eq  "меню: snapshot → выход, rc=0"     "$rc" "0"
+  rm -rf "$ws" "$reg"
+}
+
+test_menu_corp_returns_to_menu() {
+  # 5 = corp (read-only) → Enter (menu_pause) → 12 = выход
+  local ws reg out; ws="$(make_ws)"; reg="$(make_ws)"
+  out="$( ( printf '5\n\n12\n' | {
+      source "$PBX"
+      WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
+      TERM=xterm main
+    } ) 2>&1 )" || true
+  assert_has "меню: corp вызван" "$out" "Корп-состояние"
+  assert_eq  "меню: после corp снова меню" \
+    "$(printf '%s' "$out" | grep -c 'что делаем')" "2"
+  rm -rf "$ws" "$reg"
+}
+
 test_source_no_run
 test_color_gated_in_pipe
 test_ui_flags_nontty
@@ -2004,6 +2062,10 @@ test_cmd_corp_stale_and_fetchfail_warns
 test_cmd_corp_json_valid
 test_cmd_corp_tmp_cleanup
 test_cmd_corp_cli_dispatch_and_help
+test_status_json_mirror_and_push_keys
+test_status_json_mirror_sentinels
+test_menu_snapshot_runs_and_exits
+test_menu_corp_returns_to_menu
 test_scan_plain_no_branch_tail
 test_log_upstream_and_meta_lines
 test_deliver_uses_repo

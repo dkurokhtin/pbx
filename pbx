@@ -377,6 +377,8 @@ status_collect() {
   ST_META_COMMIT=''; ST_META_BRANCH=''; ST_META_PACKED_AT=-1; ST_META_DIRTY=-1
   ST_DRIFT='none'; ST_UNPACKED=-1; ST_DIRTY_NOW=-1; ST_STALE=false
   ST_REPO="$REPO"; ST_REPO_EXISTS=false
+  ST_MIRROR="${MIRROR:-}"
+  ST_PUSH_BRANCH=''; ST_PUSH_COMMIT=''; ST_PUSHED_AT=-1; ST_PUSH_SOURCE=''
 
   [[ -d "$ST_SRC" ]] && ST_SRC_EXISTS=true
   [[ -d "$ST_REPO" ]] && ST_REPO_EXISTS=true
@@ -419,6 +421,11 @@ status_collect() {
     [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
     [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
     [[ -n "$ST_META_PACKED_AT" ]] || ST_META_PACKED_AT=-1
+    ST_PUSH_BRANCH="$(sed -n 's/^PUSH_BRANCH=//p' "$meta")"
+    ST_PUSH_COMMIT="$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"
+    ST_PUSHED_AT="$(sed -n 's/^PUSHED_AT=//p' "$meta")"
+    ST_PUSH_SOURCE="$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$meta")"
+    [[ -n "$ST_PUSHED_AT" ]] || ST_PUSHED_AT=-1
   fi
 
   # дрейф от последнего pack
@@ -509,7 +516,10 @@ status_json() {
       "$(_json_str "$ST_META_COMMIT")" "$(_json_str "$ST_META_BRANCH")" "$ST_META_PACKED_AT" "$ST_META_DIRTY"
     printf '"drift":"%s","unpacked_commits":%s,"dirty_now":%s,"stale":%s,' \
       "$ST_DRIFT" "$ST_UNPACKED" "$ST_DIRTY_NOW" "$ST_STALE"
-    printf '"repo":"%s","repo_exists":%s}' "$(_json_str "$ST_REPO")" "$ST_REPO_EXISTS"
+    printf '"repo":"%s","repo_exists":%s,' "$(_json_str "$ST_REPO")" "$ST_REPO_EXISTS"
+    printf '"mirror":"%s","push_branch":"%s","push_commit":"%s","pushed_at":%s}' \
+      "$(_json_str "$ST_MIRROR")" "$(_json_str "$ST_PUSH_BRANCH")" \
+      "$(_json_str "$ST_PUSH_COMMIT")" "$ST_PUSHED_AT"
   done
   printf '\n]\n'
   return 0
@@ -571,6 +581,25 @@ cmd_status() {
       rb="$(git -C "$ST_REPO" branch --show-current 2>/dev/null || echo '?')"
       if [[ -n "$(git -C "$ST_REPO" status --porcelain 2>/dev/null)" ]]; then rstate='dirty'; else rstate='clean'; fi
       ui_dim "repo: $ST_REPO — $rb ($rstate)"
+    fi
+    if [[ -n "$ST_MIRROR" ]]; then
+      local mline="mirror: $ST_MIRROR"
+      if [[ -n "$ST_PUSH_COMMIT" ]]; then
+        local when='?'
+        if [[ "$ST_PUSHED_AT" =~ ^[0-9]+$ ]]; then
+          when="$(date -d "@$ST_PUSHED_AT" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+        fi
+        mline+=" (push: ${ST_PUSH_BRANCH:--} @ ${ST_PUSH_COMMIT:0:7}, $when"
+        local head_now=''
+        if [[ "$ST_GIT" == true ]]; then
+          head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+        fi
+        if [[ -n "$ST_PUSH_SOURCE" && -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]]; then
+          mline+=", SRC ушёл вперёд"
+        fi
+        mline+=")"
+      fi
+      ui_dim "$mline"
     fi
   done
   return 0
@@ -1955,6 +1984,8 @@ cmd_menu() {
     'pack    — упаковать проект в архив'
     'push    — снапшот рабочего дерева в зеркало'
     'deliver — доставить архив в репо (ветка + MR)'
+    'snapshot — снимок корп-состояния в зеркало (ноут)'
+    'corp    — корп-состояние проектов (дом)'
     'log     — диагностика проекта'
     'status  — сводка по проектам'
     'list    — список проектов'
@@ -1969,13 +2000,15 @@ cmd_menu() {
       0) if menu_project_flow pack;    then return 0; fi ;;
       1) if menu_project_flow push;    then return 0; fi ;;
       2) if menu_project_flow deliver; then return 0; fi ;;
-      3) menu_project_flow log || true ;;
-      4) cmd_status; menu_pause ;;
-      5) cmd_list; menu_pause ;;
-      6) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      7) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      8) cmd_help; menu_pause ;;
-      9) return 0 ;;
+      3) cmd_snapshot || true; return 0 ;;
+      4) cmd_corp || true; menu_pause ;;
+      5) menu_project_flow log || true ;;
+      6) cmd_status; menu_pause ;;
+      7) cmd_list; menu_pause ;;
+      8) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      9) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      10) cmd_help; menu_pause ;;
+      11) return 0 ;;
     esac
   done
 }
