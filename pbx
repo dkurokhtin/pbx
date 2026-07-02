@@ -419,7 +419,9 @@ collect_diag() {
         printf '[repo]    branch=%s remote=%s\n' \
           "$(git -C "$REPO" branch --show-current 2>/dev/null || echo '—')" \
           "$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '—')"
-        printf '[repo]    status:\n';       git -C "$REPO" status -s   2>/dev/null | head -30 | sed 's/^/          /'
+        local st; st="$(git -C "$REPO" status -s 2>/dev/null | head -30)"
+        printf '[repo]    status:\n'
+        if [[ -n "$st" ]]; then printf '%s\n' "$st" | sed 's/^/          /'; else printf '          (clean)\n'; fi
         printf '[repo]    last commits:\n'; git -C "$REPO" log --oneline -5 2>/dev/null | sed 's/^/          /'
       else
         printf '[repo]    REPO не git: %s\n' "$REPO"

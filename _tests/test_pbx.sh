@@ -432,6 +432,7 @@ test_log_reports_project() {
   assert_has "log: секция [config]"      "$out" "[config]"
   assert_has "log: REPO в выводе"        "$out" "$repo"
   assert_has "log: ветка репо"           "$out" "branch=dev"
+  assert_has "log: чистый статус помечен" "$out" "(clean)"
   assert_has "log: секция [archive]"     "$out" "[archive]"
   assert_has "log: имя архива"           "$out" "proj.tar.gz"
   assert_has "log: секция [env]"         "$out" "[env]"
