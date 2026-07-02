@@ -311,7 +311,7 @@ cmd_deliver() {
   # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)
   git config core.fileMode false
 
-  c_blue "🔵 Обновляю $BASE_BRANCH"
+  ui_section "Обновляю $BASE_BRANCH"
   git checkout "$BASE_BRANCH"
   git pull origin "$BASE_BRANCH"
 
@@ -332,7 +332,7 @@ cmd_deliver() {
   fi
 
   # Полная синхронизация (сохраняем служебные файлы репозитория)
-  c_blue "🔵 Синхронизирую файлы в $repo"
+  ui_section "Синхронизирую файлы в $repo"
   local syncex; mapfile -t syncex < <(sync_exclude_args)
   rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
   rm -rf "$tmp"        # tmp больше не нужен после синка
@@ -351,18 +351,26 @@ cmd_deliver() {
   # ---- guard: показать changeset и подтвердить перед commit/push -------------
   # Ловит «зеркальную» доставку от устаревшего снимка: rsync --delete молча
   # откатывает/удаляет чужую влитую в BASE_BRANCH работу. Обход: --yes / PBX_ASSUME_YES=1.
-  c_blue "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
+  ui_section "Изменения к доставке" \
+    "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
+  ui_kv BRANCH "$branch"
+  ui_kv TARGET "$TARGET_BRANCH"
   git diff --cached --stat
   local deleted f; deleted="$(git diff --cached --diff-filter=D --name-only)"
   if [[ -n "$deleted" ]]; then
+    if (( UI_COLOR_ERR )); then
+      local ndel; ndel="$(printf '%s\n' "$deleted" | wc -l | tr -d ' ')"
+      printf '\033[1;31m%s удалений: %s\033[0m\n' "$G_NO" "$ndel" >&2
+    fi
     c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
     while IFS= read -r f; do c_warn "     - $f"; done <<< "$deleted"
   fi
   if [[ "$assume_yes" == 1 ]]; then
     c_warn "   (--yes / PBX_ASSUME_YES — подтверждение пропущено)"
   elif [[ -t 0 ]]; then
-    local ans=""
-    read -r -p "Проверь список выше. Продолжить коммит и пуш MR? [y/N] " ans
+    local ans="" prompt="Проверь список выше. Продолжить коммит и пуш MR? [y/N] "
+    if (( UI_COLOR_ERR )); then prompt=$'\033[1m'"$prompt"$'\033[0m'; fi
+    read -r -p "$prompt" ans
     [[ "$ans" =~ ^[Yy]$ ]] \
       || die "Отменено. Ты на ветке '$branch'; проверь diff, затем откати: git checkout -f $BASE_BRANCH && git branch -D $branch"
   else
@@ -376,6 +384,7 @@ cmd_deliver() {
     none) c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH' запушена (без MR/PR) — «$msg».";;
     *)    c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR/PR в '$TARGET_BRANCH' — «$msg».";;
   esac
+  ui_summary "$branch" "$TARGET_BRANCH" "${msg%%$'\n'*}"
 }
 
 # ---- log: диагностика для ИИ-агента ----------------------------------------

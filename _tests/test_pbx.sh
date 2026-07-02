@@ -481,6 +481,33 @@ test_deliver_guard_blocks_deletions() {
   rm -rf "$base" "$reg"
 }
 
+# --- Guard plain-инвариант: тексты неизменны без ANSI -------------------------
+test_deliver_guard_plain_invariant() {
+  # тексты guard в plain неизменны и без ANSI (протокол агентов)
+  local base; base="$(make_ws)"
+  local remote="$base/remote.git" repo="$base/repo" src="$base/src"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  local dist="$base/_dist"; DIST_DIR="$dist"; mkdir -p "$dist"
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES
+  git init -q --bare "$remote"; git init -q "$repo"
+  ( cd "$repo" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$remote" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt \
+    && git add -A && git commit -q -m init && git push -q -u origin dev ) >/dev/null 2>&1
+  mkdir -p "$src"; echo keep > "$src/file.txt"   # снимок без roles.txt → удаление
+  tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
+  printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$src" "$repo" > "$reg/proj.conf"
+
+  local out
+  out="$( ( cmd_deliver "proj" "feature/T-8" "msg" "$dist/proj.tar.gz" </dev/null 2>&1 ) )" || true
+  assert_has "guard plain: строка 📋"            "$out" "📋 Будет закоммичено в 'feature/T-8' → MR в 'dev' (git diff --cached --stat):"
+  assert_has "guard plain: заголовок удалений"   "$out" "⚠️  БУДУТ УДАЛЕНЫ файлы из 'dev'"
+  assert_has "guard plain: имя удаляемого файла" "$out" "- roles.txt"
+  assert_no  "guard plain: без ANSI"             "$out" $'\033'
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
 # --- log: диагностика для ИИ-агента -----------------------------------------
 test_log_reports_project() {
   local base; base="$(make_ws)"
@@ -753,6 +780,7 @@ test_pack_e2e
 test_pack_e2e_registry
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
+test_deliver_guard_plain_invariant
 test_log_reports_project
 test_log_no_project
 test_log_survives_unwritable_dist
