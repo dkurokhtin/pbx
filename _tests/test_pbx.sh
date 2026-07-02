@@ -1089,6 +1089,73 @@ test_deliver_guard_plain_invariant() {
   cd "$HERE"; rm -rf "$base" "$reg"
 }
 
+# --- Э2: deliver --mirror ------------------------------------------------------------
+_mk_mirror_deliver_fixture() {
+  MD_BASE="$(make_ws)"
+  MD_REMOTE="$MD_BASE/gitlab.git"; MD_MIRROR="$MD_BASE/mirror.git"
+  MD_REPO="$MD_BASE/repo"; MD_SRC="$MD_BASE/src"
+  MD_REG="$(make_ws)"; PBX_REGISTRY_DIR="$MD_REG"
+  DIST_DIR="$MD_BASE/_dist"; mkdir -p "$DIST_DIR"
+  git init -q --bare "$MD_REMOTE"; git init -q --bare "$MD_MIRROR"
+  git init -q "$MD_REPO"
+  ( cd "$MD_REPO" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$MD_REMOTE" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt && echo ci > .gitlab-ci.yml \
+    && git add -A && git commit -qm init && git push -qu origin dev ) >/dev/null 2>&1
+  # SRC: правка file.txt, УДАЛЕНИЕ roles.txt, новый new.txt (+ незакоммиченное)
+  mkdir -p "$MD_SRC"
+  ( cd "$MD_SRC" && git init -q . && git config user.email t@t && git config user.name t \
+    && echo changed > file.txt && echo fresh > new.txt \
+    && git add -A && git commit -qm snap \
+    && echo more >> new.txt ) >/dev/null 2>&1
+  ( cd "$MD_SRC" && push_snapshot "$MD_SRC" "$MD_MIRROR" "feature/M-1" proj ) >/dev/null 2>&1
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$MD_SRC" "$MD_REPO" "$MD_MIRROR" > "$MD_REG/proj.conf"
+}
+
+test_deliver_mirror_e2e() {
+  _mk_mirror_deliver_fixture
+  ( cmd_deliver proj "feature/M-1" "mirror-доставка" --mirror --yes </dev/null ) >/dev/null 2>&1
+  assert_eq  "mirror-deliver: правка доехала"    "$(cat "$MD_REPO/file.txt")" "changed"
+  assert_has "mirror-deliver: новый файл доехал (с незакоммиченным)" "$(cat "$MD_REPO/new.txt")" "more"
+  [[ -f "$MD_REPO/roles.txt" ]] && bad "mirror-deliver: удаление НЕ отражено" || ok "mirror-deliver: удаление отражено"
+  assert_eq  "mirror-deliver: .gitlab-ci.yml жив (sync-exclude)" "$(cat "$MD_REPO/.gitlab-ci.yml")" "ci"
+  assert_has "mirror-deliver: ветка запушена" \
+    "$(git -C "$MD_REMOTE" branch --list 'feature/M-1')" "feature/M-1"
+  cd "$HERE"; rm -rf "$MD_BASE" "$MD_REG"
+}
+
+test_deliver_mirror_guard_fail_closed() {
+  _mk_mirror_deliver_fixture
+  local rc=0
+  ( cmd_deliver proj "feature/M-2" "msg" --mirror </dev/null ) >/dev/null 2>&1 || rc=$?
+  # снапшот удаляет roles.txt → guard обязан прервать без --yes в non-TTY
+  assert_eq "mirror-guard: прерывание без --yes (rc=1)" "$rc" "1"
+  assert_eq "mirror-guard: ветка НЕ запушена" \
+    "$(git -C "$MD_REMOTE" branch --list 'feature/M-2')" ""
+  cd "$HERE"; rm -rf "$MD_BASE" "$MD_REG"
+}
+
+test_deliver_mirror_requires_mirror_conf() {
+  local base; base="$(make_ws)"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  git init -q "$base/repo"
+  printf 'SRC=%s\nREPO=%s\nFORGE=none\n' "$base/src" "$base/repo" > "$reg/proj.conf"
+  local rc=0
+  ( cmd_deliver proj "feature/M-3" "msg" --mirror --yes </dev/null ) >/dev/null 2>&1 || rc=$?
+  assert_eq "mirror-deliver: без MIRROR → die" "$rc" "1"
+  cd "$HERE"; rm -rf "$base" "$reg"
+}
+
+test_deliver_archive_path_regression() {
+  # архивный путь БЕЗ --mirror работает как раньше (существующий
+  # test_deliver_uses_repo остаётся главным регрессом; этот — smoke, что
+  # флаг --mirror не влияет на разбор прочих аргументов)
+  local rc=0
+  ( cmd_deliver ) >/dev/null 2>&1 || rc=$?
+  assert_eq "deliver без аргументов по-прежнему ошибка использования" "$rc" "1"
+}
+
 # --- log: диагностика для ИИ-агента -----------------------------------------
 test_log_reports_project() {
   local base; base="$(make_ws)"
@@ -1406,6 +1473,10 @@ test_log_upstream_and_meta_lines
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant
+test_deliver_mirror_e2e
+test_deliver_mirror_guard_fail_closed
+test_deliver_mirror_requires_mirror_conf
+test_deliver_archive_path_regression
 test_log_reports_project
 test_log_no_project
 test_log_survives_unwritable_dist

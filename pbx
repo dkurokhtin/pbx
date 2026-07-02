@@ -709,17 +709,19 @@ forge_push() {
 cmd_deliver() {
   # --yes / -y (в любой позиции) или PBX_ASSUME_YES=1 — пропустить guard-подтверждение
   local assume_yes="${PBX_ASSUME_YES:-0}"
+  local from_mirror=0
   local _a _args=()
   for _a in "$@"; do
     case "$_a" in
       --yes|-y) assume_yes=1 ;;
+      --mirror) from_mirror=1 ;;
       *)        _args+=("$_a") ;;
     esac
   done
   set -- ${_args[@]+"${_args[@]}"}
 
   local project branch msg archive
-  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]}")"
+  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]}")"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
   archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
@@ -733,7 +735,11 @@ cmd_deliver() {
   PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
   local repo="$REPO"
 
-  [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
+  if [[ "$from_mirror" == 1 ]]; then
+    [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' (нужен для --mirror). Добавь MIRROR=... в $PBX_REGISTRY_DIR/$project.conf"
+  else
+    [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
+  fi
   # Проверка конвенции ветки — предупреждаем, но не блокируем
   [[ "$branch" =~ ^(feature|fix|hotfix|bugfix|chore)/ ]] \
     || c_warn "⚠️  Ветка '$branch' не по конвенции feature/PROJ-123-… — продолжаю как есть."
@@ -750,12 +756,23 @@ cmd_deliver() {
   # Распаковка во временную папку
   local tmp; tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
-  case "$archive" in
-    *.zip)          unzip -q "$archive" -d "$tmp" ;;
-    *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
-    *.tar)          tar -xf "$archive" -C "$tmp" ;;
-    *) die "Неизвестный формат архива: $archive" ;;
-  esac
+  if [[ "$from_mirror" == 1 ]]; then
+    # Источник — ветка зеркала (Э2, вариант В): наполняем ту же tmp-директорию,
+    # что раньше наполнял архив; дальше НЕТРОНУТЫЙ rsync/guard-путь.
+    c_blue "🔵 Забираю '$branch' из зеркала"
+    if ! GIT_TERMINAL_PROMPT=0 timeout 30 git fetch -q "$MIRROR" "$branch" 2>/dev/null; then
+      die "Не удалось получить '$branch' из зеркала ($MIRROR). Проверь PAT/ключ и срок действия, либо используй архивный путь."
+    fi
+    git archive FETCH_HEAD | tar -x -C "$tmp" \
+      || die "Не удалось развернуть снапшот из FETCH_HEAD"
+  else
+    case "$archive" in
+      *.zip)          unzip -q "$archive" -d "$tmp" ;;
+      *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
+      *.tar)          tar -xf "$archive" -C "$tmp" ;;
+      *) die "Неизвестный формат архива: $archive" ;;
+    esac
+  fi
   # Если внутри единственный корневой каталог — заходим в него
   local inner="$tmp"
   if [[ $(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 \
@@ -1010,7 +1027,7 @@ pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
-  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
+  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
   pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
@@ -1056,7 +1073,7 @@ ${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
 ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
-  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes]
+  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
   ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
