@@ -489,6 +489,41 @@ test_scan_skips_nongit_and_noremote() {
   assert_no "empty пропущен" "$out" "empty"
   rm -rf "$ws"
 }
+test_scan_plain_container_one() {
+  local ws; ws="$(make_ws)"
+  mkdir -p "$ws/sup"                    # обычный каталог, НЕ git
+  mk_repo "$ws/sup/sup-frontend" "git@gitlab.rt-dc.ru:suba/sup-frontend.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "plain-контейнер→inner под именем sup" "$out" "$(printf 'OK\tsup\t%s/sup/sup-frontend' "$ws")"
+  rm -rf "$ws"
+}
+test_scan_deep_nesting() {
+  local ws; ws="$(make_ws)"
+  mkdir -p "$ws/sup/apps"               # два обычных (не git) уровня
+  mk_repo "$ws/sup/apps/frontend" "git@gitlab.rt-dc.ru:suba/frontend.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "вложенность >1 уровня находится" "$out" "$(printf 'OK\tsup\t%s/sup/apps/frontend' "$ws")"
+  rm -rf "$ws"
+}
+test_scan_plain_container_multi() {
+  local ws; ws="$(make_ws)"
+  mkdir -p "$ws/c"
+  mk_repo "$ws/c/a" "git@h:/a.git"; mk_repo "$ws/c/b" "git@h:/b.git"
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "plain-контейнер с 2 репо→WARN" "$out" "$(printf 'WARN\tc\t')"
+  assert_no  "plain-контейнер с 2 репо→не OK" "$out" "$(printf 'OK\tc\t')"
+  rm -rf "$ws"
+}
+test_scan_no_descend_into_repo() {
+  local ws; ws="$(make_ws)"
+  mkdir -p "$ws/c"
+  mk_repo "$ws/c/app" "git@h:/app.git"
+  mk_repo "$ws/c/app/vendor" "git@h:/vendor.git"   # репо ВНУТРИ уже найденного
+  local out; out="$(scan_candidates "$ws")"
+  assert_has "не спускаемся внутрь репо: c→app" "$out" "$(printf 'OK\tc\t%s/c/app' "$ws")"
+  assert_no  "вложенный vendor не считается вторым репо" "$out" "WARN"
+  rm -rf "$ws"
+}
 
 test_source_no_run
 test_repo_remote_url
@@ -496,6 +531,10 @@ test_scan_whole_repo
 test_scan_container_one
 test_scan_container_multi
 test_scan_skips_nongit_and_noremote
+test_scan_plain_container_one
+test_scan_deep_nesting
+test_scan_plain_container_multi
+test_scan_no_descend_into_repo
 test_scan_creates_repo_entry
 test_scan_github_forge
 test_scan_container_entry

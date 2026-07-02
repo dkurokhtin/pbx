@@ -30,6 +30,8 @@ DIST_DIR="${PBX_DIST_DIR:-$WORKSPACE/_dist}"
 PBX_IGNORE_DIRS="${PBX_IGNORE_DIRS:-docs}"
 # Каталог реестра проектов (имя → SRC/REPO + пер-проектные ключи):
 PBX_REGISTRY_DIR="${PBX_REGISTRY_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pbx/projects}"
+# scan: на сколько уровней вглубь контейнера искать вложенный git-репо:
+PBX_SCAN_MAX_DEPTH="${PBX_SCAN_MAX_DEPTH:-4}"
 # Пер-проектные настройки + SRC/REPO резолвит load_config: дефолт →
 # $WORKSPACE/.pbx.conf → реестр $PBX_REGISTRY_DIR/<имя>.conf → <SRC>/.pbx.conf → env PBX_*.
 # ============================================================================
@@ -107,9 +109,30 @@ repo_remote_url() {
   return 0
 }
 
+# Печатает git-репозитории с remote под <dir> не глубже <depth> уровней,
+# НЕ спускаясь внутрь уже найденного репо. Пропускает скрытые и node_modules.
+scan_inner_repos() {
+  local dir="$1" depth="$2" sub base
+  [[ "$depth" -le 0 ]] && return 0
+  for sub in "$dir"/*/; do
+    [[ -d "$sub" ]] || continue
+    sub="${sub%/}"
+    base="$(basename "$sub")"
+    [[ "$base" == .* || "$base" == node_modules ]] && continue
+    if [[ -e "$sub/.git" && -n "$(repo_remote_url "$sub")" ]]; then
+      printf '%s\n' "$sub"                 # нашли репо — глубже НЕ идём
+    else
+      scan_inner_repos "$sub" "$((depth-1))"
+    fi
+  done
+  return 0
+}
+
 # По подпапкам <root> печатает кандидатов:
 #   OK\t<имя>\t<путь-репо>\t<remote>   — репо с remote (сам или единственный в контейнере)
 #   WARN\t<имя>\t<причина>             — контейнер с несколькими внутренними репо
+# Контейнер = каталог, который сам НЕ git-репо-с-remote (обычный ИЛИ git без
+# remote); внутри ищем git-репо с remote на глубину PBX_SCAN_MAX_DEPTH.
 scan_candidates() {
   local root="$1" d name url inner cnt only
   for d in "$root"/*/; do
@@ -118,21 +141,18 @@ scan_candidates() {
     name="$(basename "$d")"
     [[ "$name" == _* || "$name" == .* ]] && continue
     [[ "$name" == *$'\t'* || "$name" == *$'\n'* ]] && continue
-    [[ -e "$d/.git" ]] || continue
+    # 1) сам каталог — git-репо с remote → берём как есть
     url="$(repo_remote_url "$d")"
     if [[ -n "$url" ]]; then
       printf 'OK\t%s\t%s\t%s\n' "$name" "$d" "$url"
       continue
     fi
-    # контейнер (git без remote) — ищем ровно один внутренний репо с remote
+    # 2) иначе — контейнер: ищем внутри git-репо с remote (на любой глубине)
     cnt=0; only=""
-    for inner in "$d"/*/; do
-      [[ -d "$inner" ]] || continue
-      inner="${inner%/}"
-      [[ -e "$inner/.git" ]] || continue
-      [[ -n "$(repo_remote_url "$inner")" ]] || continue
+    while IFS= read -r inner; do
+      [[ -n "$inner" ]] || continue
       cnt=$((cnt+1)); only="$inner"
-    done
+    done < <(scan_inner_repos "$d" "$PBX_SCAN_MAX_DEPTH")
     if [[ "$cnt" -eq 1 ]]; then
       printf 'OK\t%s\t%s\t%s\n' "$name" "$only" "$(repo_remote_url "$only")"
     elif [[ "$cnt" -gt 1 ]]; then
