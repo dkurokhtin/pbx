@@ -2,16 +2,12 @@
 # =============================================================================
 #  pbx — единый CLI доставки проектов Pybotx (только для WSL).
 #
-#  Складывает прежние pack.sh + update.sh в один инструмент и добавляет
-#  pipeline-команду ship (упаковать → доставить → задеплоить одной строкой).
-#  deploy делегируется родному scripts/deploy.sh проекта — он корректен и
-#  дублировать его не нужно.
+#  Складывает прежние pack.sh + update.sh в один инструмент: упаковать исходники
+#  в архив и доставить их в git-репо с созданием MR/PR.
 #
 #  Команды:
 #    pbx pack    <проект>
 #    pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
-#    pbx deploy  <проект> [env]
-#    pbx ship    <проект> <ветка> <сообщение> [env] [--yes]
 #    pbx list
 #    pbx help
 #
@@ -50,7 +46,7 @@ strip_cr() { printf '%s' "${1//$'\r'/}"; }   # защита от CRLF/копип
 load_config() {
   local project="${1:-}"
   # 1) встроенные дефолты
-  BASE_BRANCH="dev"; TARGET_BRANCH="dev"; DEFAULT_ENV="dev"; FORGE="gitlab"
+  BASE_BRANCH="dev"; TARGET_BRANCH="dev"; FORGE="gitlab"
   EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=()
   SRC=""; REPO=""
   # 2) глобальный конфиг
@@ -65,14 +61,13 @@ load_config() {
   # 5) env-override (всегда побеждает)
   [[ -n "${PBX_BASE_BRANCH:-}"   ]] && BASE_BRANCH="$PBX_BASE_BRANCH"
   [[ -n "${PBX_TARGET_BRANCH:-}" ]] && TARGET_BRANCH="$PBX_TARGET_BRANCH"
-  [[ -n "${PBX_DEFAULT_ENV:-}"   ]] && DEFAULT_ENV="$PBX_DEFAULT_ENV"
   [[ -n "${PBX_FORGE:-}"         ]] && FORGE="$PBX_FORGE"
   # 6) финализация путей (fallback)
   SRC="${SRC:-$WORKSPACE/$project}"
   REPO="${REPO:-$PROJECTS_ROOT/$project}"
   # 7) защита от CRLF (конфиги на /mnt/c часто с \r), включая SRC/REPO
   local __v __i
-  for __v in BASE_BRANCH TARGET_BRANCH DEFAULT_ENV FORGE SRC REPO; do
+  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO; do
     printf -v "$__v" '%s' "${!__v//$'\r'/}"
   done
   for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
@@ -231,7 +226,6 @@ cmd_pack() {
   tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
   c_green "✅ Архив готов: $out"
-  PBX_LAST_ARCHIVE="$out"   # для ship
 }
 
 # Пуш ветки + создание MR/PR согласно FORGE.
@@ -325,7 +319,7 @@ cmd_deliver() {
   local syncex; mapfile -t syncex < <(sync_exclude_args)
   rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
   rm -rf "$tmp"        # tmp больше не нужен после синка
-  trap - RETURN        # снять RETURN-trap, иначе сработает на возврате cmd_deploy в `pbx ship`
+  trap - RETURN        # tmp уже удалён — снять RETURN-trap, чтобы он не сработал на возврате функции
 
   # Ветка от BASE_BRANCH → коммит → пуш с MR/PR в TARGET_BRANCH
   git checkout -b "$branch"
@@ -367,51 +361,6 @@ cmd_deliver() {
   esac
 }
 
-# ---- deploy ----------------------------------------------------------------
-# Делегируем родному скрипту проекта (собирает фронт+бэк, образ на REMOTE_HOST,
-# перезапуск контейнера, ожидание healthy). Миграции применяются автоматически.
-cmd_deploy() {
-  local project env
-  project="$(strip_cr "${1:?Использование: pbx deploy <проект> [env]}")"
-  load_config "$project"
-  env="$(strip_cr "${2:-$DEFAULT_ENV}")"
-
-  # NB: deploy/ship ищут scripts/deploy.sh в $PROJECTS_ROOT/<имя>, а НЕ в реестровом REPO.
-  local scripts="$PROJECTS_ROOT/$project/scripts"
-  [[ -x "$scripts/deploy.sh" ]] || die "Нет $scripts/deploy.sh"
-
-  c_blue "🔵 Деплой $project → $env"
-  ( cd "$scripts" && ./deploy.sh "$env" )
-  c_green "✅ Деплой $project ($env) завершён."
-}
-
-# ---- ship ------------------------------------------------------------------
-# Полный конвейер: pack → deliver → deploy.
-cmd_ship() {
-  # --yes / -y — вынуть и прокинуть в deliver (иначе guard остановит неинтерактивный ship)
-  local yesflag=()
-  local _a _args=()
-  for _a in "$@"; do
-    case "$_a" in
-      --yes|-y) yesflag=(--yes) ;;
-      *)        _args+=("$_a") ;;
-    esac
-  done
-  set -- ${_args[@]+"${_args[@]}"}
-
-  local project branch msg env
-  project="$(strip_cr "${1:?Использование: pbx ship <проект> <ветка> <сообщение> [env] [--yes]}")"
-  load_config "$project"
-  branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
-  msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
-  env="$(strip_cr "${4:-$DEFAULT_ENV}")"
-
-  c_blue "🚀 ship $project → ветка '$branch', env '$env'"
-  cmd_pack "$project"
-  cmd_deliver "$project" "$branch" "$msg" "$PBX_LAST_ARCHIVE" ${yesflag[@]+"${yesflag[@]}"}
-  cmd_deploy "$project" "$env"
-  c_green "🎉 Готово: $project доставлен и задеплоен ($env)."
-}
 
 # ---- add -------------------------------------------------------------------
 # Завести проект в реестр: $PBX_REGISTRY_DIR/<имя>.conf с SRC.
@@ -493,8 +442,6 @@ pbx — доставка проектов Pybotx (WSL)
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
-  pbx deploy  <проект> [env]                    собрать образ и задеплоить (env: dev|test|prod)
-  pbx ship    <проект> <ветка> <сообщение> [env] [--yes]  всё сразу: pack → deliver → deploy
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
@@ -505,20 +452,17 @@ pbx — доставка проектов Pybotx (WSL)
 Примеры:
   pbx pack <проект>
   pbx deliver <проект> feature/SUBA-2147-fix-name "Описание изменений"
-  pbx deploy <проект> test
-  pbx ship <проект> feature/SUBA-2147-new-feature "Описание изменений" dev
   pbx add sup /home/me/sup
 
 Переопределяемые переменные окружения:
   PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
-  PBX_TARGET_BRANCH (=dev)     PBX_DEFAULT_ENV (=dev)  PBX_FORGE (=gitlab)
+  PBX_TARGET_BRANCH (=dev)     PBX_FORGE (=gitlab)
   PBX_ASSUME_YES (=0)          пропустить подтверждение deliver-guard (как --yes)
 
 Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
   BASE_BRANCH=dev            от какой ветки ответвляемся
   TARGET_BRANCH=dev          куда MR/PR (master-MR обычно вручную перед релизом)
-  DEFAULT_ENV=dev            окружение деплоя
   FORGE=gitlab               gitlab | github | none
   EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
   EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка
@@ -526,7 +470,7 @@ pbx — доставка проектов Pybotx (WSL)
 
 Реестр проектов ($PBX_REGISTRY_DIR, свой на каждой машине):
   <имя>.conf: SRC=<путь к исходникам здесь>   REPO=<git-репо для deliver>
-  плюс BASE_BRANCH/TARGET_BRANCH/DEFAULT_ENV/FORGE/EXTRA_*.
+  плюс BASE_BRANCH/TARGET_BRANCH/FORGE/EXTRA_*.
   Проект берётся из реестра, иначе из $WORKSPACE/<имя> (SRC) и $PROJECTS_ROOT/<имя> (REPO).
 EOF
 }
@@ -537,8 +481,6 @@ main() {
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
-    deploy)             require_wsl; cmd_deploy "$@" ;;
-    ship)               require_wsl; cmd_ship "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
     list|ls)            cmd_list ;;

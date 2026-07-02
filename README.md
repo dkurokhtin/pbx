@@ -11,9 +11,7 @@ git-хосту. Копирование архива между машинами 
     pbx scan    (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
     pbx list                                        показать проекты (реестр ∪ WORKSPACE)
     pbx pack    <имя>                               упаковать SRC в _dist/<имя>.tar.gz
-    pbx deliver <имя> <ветка> <сообщение> [архив]   распаковать в REPO, ветка, коммит, MR/PR
-    pbx deploy  <имя> [env]                         делегирует scripts/deploy.sh проекта
-    pbx ship    <имя> <ветка> <сообщение> [env]     pack → deliver → deploy
+    pbx deliver <имя> <ветка> <сообщение> [архив] [--yes]  распаковать в REPO, ветка, коммит, MR/PR
     pbx help
 
 ## Реестр проектов
@@ -23,7 +21,7 @@ git-хосту. Копирование архива между машинами 
 
     SRC=/home/me/sup          # что паковать на ЭТОЙ машине (корень репо)
     REPO=/root/sup            # куда доставлять (иначе $PROJECTS_ROOT/<имя>)
-    TARGET_BRANCH=dev         # + BASE_BRANCH / DEFAULT_ENV / FORGE / EXTRA_*
+    TARGET_BRANCH=dev         # + BASE_BRANCH / FORGE / EXTRA_*
 
 Если проекта нет в реестре — fallback: `SRC=$WORKSPACE/<имя>`, `REPO=$PROJECTS_ROOT/<имя>`.
 
@@ -34,7 +32,7 @@ git-хосту. Копирование архива между машинами 
 ## Переменные окружения
 
     PBX_WORKSPACE  PBX_PROJECTS_ROOT  PBX_DIST_DIR  PBX_REGISTRY_DIR
-    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_DEFAULT_ENV  PBX_FORGE  PBX_IGNORE_DIRS
+    PBX_BASE_BRANCH  PBX_TARGET_BRANCH  PBX_FORGE  PBX_IGNORE_DIRS
 
 ## Рабочий процесс (двухмашинный)
 

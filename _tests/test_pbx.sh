@@ -36,12 +36,11 @@ test_source_no_run() {
 # --- Task 2: load_config ----------------------------------------------------
 test_defaults() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
-  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_DEFAULT_ENV PBX_FORGE
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE
   mkdir -p "$ws/proj"
   load_config "proj"
   assert_eq "дефолт BASE_BRANCH"   "$BASE_BRANCH"   "dev"
   assert_eq "дефолт TARGET_BRANCH" "$TARGET_BRANCH" "dev"
-  assert_eq "дефолт DEFAULT_ENV"   "$DEFAULT_ENV"   "dev"
   assert_eq "дефолт FORGE"         "$FORGE"         "gitlab"
   rm -rf "$ws"
 }
@@ -59,7 +58,7 @@ test_project_over_global() {
 
 test_env_wins() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
-  unset PBX_BASE_BRANCH PBX_DEFAULT_ENV PBX_FORGE
+  unset PBX_BASE_BRANCH PBX_FORGE
   mkdir -p "$ws/proj"
   printf 'TARGET_BRANCH=bbb\n' > "$ws/proj/.pbx.conf"
   PBX_TARGET_BRANCH=ccc load_config "proj"
@@ -70,7 +69,7 @@ test_env_wins() {
 
 test_load_config_crlf() {
   local ws; ws="$(make_ws)"; mkdir -p "$ws/proj"; WORKSPACE="$ws"
-  unset PBX_FORGE PBX_TARGET_BRANCH PBX_BASE_BRANCH PBX_DEFAULT_ENV
+  unset PBX_FORGE PBX_TARGET_BRANCH PBX_BASE_BRANCH
   printf 'FORGE=github\r\nTARGET_BRANCH=dev\r\n' > "$ws/proj/.pbx.conf"
   load_config "proj"
   assert_eq "CRLF в конфиге: FORGE без CR"         "$FORGE"         "github"
@@ -82,7 +81,7 @@ test_load_config_errexit_safe() {
   local ws; ws="$(make_ws)"; mkdir -p "$ws/proj"
   # Запускаем в свежем bash с set -e: load_config без PBX_FORGE не должен ронять скрипт.
   local out
-  out="$(env -u PBX_FORGE -u PBX_BASE_BRANCH -u PBX_TARGET_BRANCH -u PBX_DEFAULT_ENV \
+  out="$(env -u PBX_FORGE -u PBX_BASE_BRANCH -u PBX_TARGET_BRANCH \
         bash -c 'set -euo pipefail; source "'"$PBX"'"; WORKSPACE="'"$ws"'"; load_config proj; echo REACHED' 2>&1)"
   assert_eq "load_config не падает под set -e (нет PBX_FORGE)" "$out" "REACHED"
   rm -rf "$ws"
@@ -92,7 +91,7 @@ test_load_config_errexit_safe() {
 test_registry_src_repo() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"; PROJECTS_ROOT="/root"
   local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
-  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_DEFAULT_ENV PBX_FORGE
+  unset PBX_BASE_BRANCH PBX_TARGET_BRANCH PBX_FORGE
   printf 'SRC=/home/me/sup\nREPO=/root/sup\nTARGET_BRANCH=dev\n' > "$reg/sup.conf"
   load_config "sup"
   assert_eq "реестр: SRC"           "$SRC"           "/home/me/sup"
@@ -364,7 +363,7 @@ test_deliver_uses_repo() {
     "$src" "$repo" > "$reg/proj.conf"
 
   cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" --yes >/dev/null 2>&1
-  assert_eq "deliver снял RETURN-trap (ship не упадёт)" "$(trap -p RETURN)" ""
+  assert_eq "deliver снял RETURN-trap (не течёт в вызывающий шелл)" "$(trap -p RETURN)" ""
 
   assert_eq "deliver: файл синкнут в REPO" "$(cat "$repo/file.txt")" "new"
   assert_has "deliver: added.txt в REPO"   "$(ls "$repo")" "added.txt"
