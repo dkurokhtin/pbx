@@ -536,6 +536,37 @@ test_pack_e2e_registry() {
   rm -rf "$base" "$reg"
 }
 
+# --- pack: манифест .meta ------------------------------------------------------
+test_pack_writes_meta_git() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  ( cd "$ws/proj" && git init -q . && git config user.email t@t && git config user.name t \
+    && git add -A && git commit -qm init && echo dirty >> src/a.txt ) >/dev/null 2>&1
+  cmd_pack proj >/dev/null 2>&1
+  local meta="$ws/_dist/proj.meta" m
+  if [[ -f "$meta" ]]; then ok "meta: файл создан"; else bad "meta: файл не создан"; fi
+  m="$(cat "$meta" 2>/dev/null)"
+  assert_has "meta: версия"     "$m" "PBX_META_VERSION=1"
+  assert_has "meta: COMMIT"     "$m" "COMMIT=$(git -C "$ws/proj" rev-parse HEAD)"
+  assert_has "meta: BRANCH"     "$m" "BRANCH=$(git -C "$ws/proj" branch --show-current)"
+  assert_has "meta: DIRTY=1"    "$m" "DIRTY_AT_PACK=1"
+  assert_has "meta: PACKED_AT"  "$m" "PACKED_AT="
+  rm -rf "$ws" "$reg"
+}
+
+test_pack_writes_meta_nongit() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"; DIST_DIR="$ws/_dist"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
+  cmd_pack proj >/dev/null 2>&1
+  local m; m="$(cat "$ws/_dist/proj.meta" 2>/dev/null)"
+  assert_has "meta(не-git): COMMIT=-" "$m" "COMMIT=-"
+  assert_has "meta(не-git): BRANCH=-" "$m" "BRANCH=-"
+  assert_has "meta(не-git): DIRTY=-"  "$m" "DIRTY_AT_PACK=-"
+  rm -rf "$ws" "$reg"
+}
+
 # --- Task 3: deliver в REPO из реестра (bare remote, FORGE=none) -------------
 test_deliver_uses_repo() {
   local base; base="$(make_ws)"
@@ -923,6 +954,8 @@ test_sync_excludes
 test_exclude_builders_errexit_safe
 test_pack_e2e
 test_pack_e2e_registry
+test_pack_writes_meta_git
+test_pack_writes_meta_nongit
 test_deliver_uses_repo
 test_deliver_guard_blocks_deletions
 test_deliver_guard_plain_invariant

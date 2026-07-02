@@ -239,6 +239,31 @@ sync_exclude_args() {
   return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
 }
 
+# ---- meta: манифест последней упаковки ---------------------------------------
+# DIST_DIR/<проект>.meta, bash-формат KEY=value (jq нет). Пишется атомарно
+# (.tmp → mv), best-effort: сбой записи меты НЕ роняет pack — архив важнее.
+# Читатели: pbx status (дрейф по коммитам), pbx log, этапы Э2/Э3.
+write_pack_meta() {
+  local project="$1" src="$2" out_meta="$3"
+  local commit='-' branch='-' dirty='-'
+  if [[ -e "$src/.git" ]]; then
+    commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo '-')"
+    branch="$(git -C "$src" branch --show-current 2>/dev/null || true)"
+    [[ -n "$branch" ]] || branch='-'
+    dirty="$(git -C "$src" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  {
+    printf '# pbx meta: проект %s, автогенерация pack\n' "$project"
+    printf 'PBX_META_VERSION=1\n'
+    printf 'PACKED_AT=%s\n' "$(date +%s)"
+    printf 'COMMIT=%s\n' "$commit"
+    printf 'BRANCH=%s\n' "$branch"
+    printf 'DIRTY_AT_PACK=%s\n' "$dirty"
+  } > "$out_meta.tmp" 2>/dev/null && mv "$out_meta.tmp" "$out_meta" 2>/dev/null \
+    || c_warn "⚠️  Не удалось записать мету: $out_meta"
+  return 0
+}
+
 # ---- pack ------------------------------------------------------------------
 # Упаковать исходники проекта в _dist/<проект>.tar.gz.
 # Исключаем всё, что не должно попасть в репозиторий: .git, .venv, node_modules,
@@ -258,7 +283,18 @@ cmd_pack() {
   local excludes; mapfile -t excludes < <(pack_exclude_args)
   tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
 
+  local meta="$DIST_DIR/$project.meta"
+  write_pack_meta "$project" "$SRC" "$meta"
+
   ui_dim "размер: $(du -h "$out" | awk '{print $1}')"
+  if [[ -f "$meta" ]]; then
+    local mcommit mbranch
+    mcommit="$(sed -n 's/^COMMIT=//p' "$meta")"
+    mbranch="$(sed -n 's/^BRANCH=//p' "$meta")"
+    if [[ "$mcommit" != '-' && -n "$mcommit" ]]; then
+      ui_dim "meta: ${mcommit:0:7} @ $mbranch"
+    fi
+  fi
   c_green "✅ Архив готов: $out"
 }
 
