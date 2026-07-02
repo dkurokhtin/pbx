@@ -563,7 +563,8 @@ cmd_scan() {
 
 # ---- help ------------------------------------------------------------------
 cmd_help() {
-  cat <<'EOF'
+  if (( ! UI_COLOR_OUT )); then
+    cat <<'EOF'
 pbx — доставка проектов Pybotx (WSL)
 
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
@@ -603,6 +604,32 @@ pbx — доставка проектов Pybotx (WSL)
   <имя>.conf: SRC=<путь к исходникам здесь>   REPO=<git-репо для deliver>
   плюс BASE_BRANCH/TARGET_BRANCH/FORGE/EXTRA_*.
   Проект берётся из реестра, иначе из $WORKSPACE/<имя> (SRC) и $PROJECTS_ROOT/<имя> (REPO).
+EOF
+    return 0
+  fi
+  cat <<EOF
+${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
+
+${C_BOLD}Команды${C_RESET}
+  ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
+  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes]
+                                          ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
+                                          ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
+  ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
+  ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
+  ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
+  ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
+  ${C_CYAN}pbx${C_RESET}                                 ${C_DIM}интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)${C_RESET}
+
+${C_BOLD}Примеры${C_RESET}
+  pbx pack sup
+  pbx deliver sup feature/SUBA-2147-fix-name "Описание изменений"
+  pbx log sup
+
+${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
+            ${C_DIM}PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES PBX_NO_MENU${C_RESET}
+
+${C_DIM}Конфиги и реестр: подробности в plain-справке (pbx help | cat) и README.${C_RESET}
 EOF
 }
 

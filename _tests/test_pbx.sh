@@ -343,6 +343,14 @@ test_list_pipe_bare_names() {
   rm -rf "$ws" "$reg"
 }
 
+test_help_plain_invariant() {
+  local out; out="$(bash "$PBX" help 2>&1)"
+  assert_has "help plain: шапка"        "$out" "pbx — доставка проектов Pybotx (WSL)"
+  assert_has "help plain: команда pack" "$out" "pbx pack    <проект>"
+  assert_has "help plain: реестр"       "$out" "Реестр проектов"
+  assert_no  "help plain: без ANSI"     "$out" $'\033'
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -783,6 +791,7 @@ test_registry_crlf_inproject_layer
 test_list_projects
 test_list_union
 test_list_pipe_bare_names
+test_help_plain_invariant
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes
