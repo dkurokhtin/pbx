@@ -333,6 +333,16 @@ test_list_union() {
   rm -rf "$ws" "$reg"
 }
 
+test_list_pipe_bare_names() {
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  local reg; reg="$(make_ws)"; PBX_REGISTRY_DIR="$reg"
+  unset PBX_IGNORE_DIRS
+  mkdir -p "$ws/alpha" "$ws/beta"
+  local out; out="$(cmd_list 2>/dev/null)"
+  assert_eq "list в пайпе: голые имена по строке" "$out" "$(printf 'alpha\nbeta')"
+  rm -rf "$ws" "$reg"
+}
+
 # --- Task 4: exclude builders ----------------------------------------------
 test_pack_excludes() {
   EXTRA_PACK_EXCLUDES=("dist" "coverage")
@@ -772,6 +782,7 @@ test_registry_crlf
 test_registry_crlf_inproject_layer
 test_list_projects
 test_list_union
+test_list_pipe_bare_names
 test_pack_excludes
 test_pack_excludes_empty
 test_sync_excludes

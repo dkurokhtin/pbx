@@ -190,10 +190,28 @@ list_projects() {
 }
 
 cmd_list() {
-  c_blue "🔵 Проекты (реестр ∪ WORKSPACE):"
-  local any=0 p
-  while IFS= read -r p; do c_green "  • $p"; any=1; done < <(list_projects)
-  [[ "$any" -eq 1 ]] || c_warn "  (проектов не найдено)"
+  # Пайп/агенты: стабильный machine-readable формат — голые имена по строке.
+  if (( ! UI_COLOR_OUT )); then
+    list_projects
+    return 0
+  fi
+  # TTY: таблица со статусами. load_config мутирует глобали — cmd_list терминальна.
+  ui_section "Проекты (реестр ∪ WORKSPACE)"
+  local p mark arch info any=0
+  while IFS= read -r p; do
+    any=1
+    load_config "$p"
+    if [[ -d "$SRC" ]]; then mark="${C_GREEN}${G_OK}${C_RESET}"; else mark="${C_RED}${G_NO}${C_RESET}"; fi
+    arch="$DIST_DIR/$p.tar.gz"
+    if [[ -f "$arch" ]]; then
+      info="$(du -h "$arch" 2>/dev/null | awk '{print $1}'), $(date -r "$arch" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
+    else
+      info="—"
+    fi
+    printf '  %-16s SRC %s  %sархив:%s %s\n' "$p" "$mark" "$C_DIM" "$C_RESET" "$info"
+  done < <(list_projects)
+  (( any )) || c_warn "  (проектов не найдено)"
+  return 0
 }
 
 # ---- exclude builders (pack/deliver) ---------------------------------------
