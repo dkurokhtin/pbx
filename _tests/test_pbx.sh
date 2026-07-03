@@ -1611,6 +1611,69 @@ test_cmd_ctx_in_help() {
   assert_has "help: pbx ctx упомянут" "$out" "pbx ctx"
 }
 
+test_cmd_ctx_json_valid_and_fields() {
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
+  assert_eq "ctx json: rc=0" "$rc" "0"
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1; then
+      ok "ctx json: валидный JSON"
+    else
+      bad "ctx json: НЕ валидный JSON: $out"
+    fi
+  fi
+  assert_has "ctx json: verdict danger"      "$out" '"verdict":"danger"'
+  assert_has "ctx json: behind_n=1"          "$out" '"behind_n":1'
+  assert_has "ctx json: причина в reasons"   "$out" '"code":"home_behind_corp"'
+  assert_has "ctx json: home-блок"           "$out" '"home":{'
+  assert_has "ctx json: corp-блок"           "$out" '"snapshot_at":'
+  assert_has "ctx json: compared_at"         "$out" '"compared_at":'
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_json_unknown_corp_null() {
+  _mk_ctx_fixture
+  local reg; reg="$(make_ws)"
+  # без MIRROR: в json-режиме не die, а unknown-запись с corp:null
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/proj.conf"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
+  assert_eq  "ctx json unknown: rc=0"          "$rc" "0"
+  assert_has "ctx json unknown: verdict"       "$out" '"verdict":"unknown"'
+  assert_has "ctx json unknown: corp:null"     "$out" '"corp":null'
+  assert_has "ctx json unknown: код no_mirror" "$out" '"code":"no_mirror"'
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json unknown: валиден" || bad "ctx json unknown: НЕ валиден: $out"
+  fi
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg"
+}
+
+test_cmd_ctx_json_nasty_subjects() {
+  _mk_ctx_fixture
+  ( cd "$CE_REPO" && git commit -qam "$(printf 'таб\tи "кавычки" 100%%')" --allow-empty \
+    && git push -q origin dev ) >/dev/null 2>&1
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json: гадкие сабжекты не ломают JSON" \
+      || bad "ctx json: сломан гадкими сабжектами: $out"
+  fi
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2342,6 +2405,9 @@ test_cmd_ctx_no_mirror_dies_plain
 test_cmd_ctx_all_skips_no_mirror
 test_cmd_ctx_unknown_flag_dies
 test_cmd_ctx_in_help
+test_cmd_ctx_json_valid_and_fields
+test_cmd_ctx_json_unknown_corp_null
+test_cmd_ctx_json_nasty_subjects
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

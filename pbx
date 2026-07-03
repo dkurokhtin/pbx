@@ -1476,8 +1476,71 @@ ctx_render_project() {
   return 0
 }
 
-# ctx_json — реализация в Task 4 (Э4); заглушка честно умирает.
-ctx_json() { die "ctx --json ещё не реализован"; }
+# ctx_json <проект>… — JSON-массив вердиктов (схема — спека Э4 §3.3;
+# порядок ключей фиксирован — контракт для ИИ).
+ctx_json() {
+  local p first=1 d rc
+  local now; now="$(date +%s)"
+  printf '['
+  for p in "$@"; do
+    load_config "$p"
+    status_collect "$p"
+    d="$(mktemp -d -t pbx-ctx.XXXXXX)"
+    rc=0
+    if [[ -z "${MIRROR:-}" ]]; then
+      rc=4
+    else
+      corp_read_state "$MIRROR" "$d" || rc=$?
+    fi
+    ctx_compare "$d" "$rc"
+    if (( first )); then first=0; else printf ','; fi
+    printf '\n  {"name":"%s","verdict":"%s","behind_n":%s,' \
+      "$(_json_str_v2 "$p")" "$CTX_VERDICT" "$CTX_BEHIND_N"
+    # reasons
+    printf '"reasons":['
+    local rfirst=1 code level msg
+    if [[ -n "$CTX_REASONS" ]]; then
+      while IFS=$'\t' read -r code level msg || [[ -n "$code" ]]; do
+        [[ -n "$code" ]] || continue
+        if (( rfirst )); then rfirst=0; else printf ','; fi
+        printf '{"code":"%s","level":"%s","msg":"%s"}' \
+          "$code" "$level" "$(_json_str_v2 "$msg")"
+      done <<< "$CTX_REASONS"
+    fi
+    printf '],'
+    # home
+    local head_now=''
+    [[ "$ST_GIT" == true ]] && head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+    printf '"home":{"branch":"%s","dirty":%s,"head":"%s","meta_commit":"%s","packed_at":%s,"push_commit":"%s","pushed_at":%s},' \
+      "$(_json_str_v2 "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str_v2 "$head_now")" \
+      "$(_json_str_v2 "$ST_META_COMMIT")" "$ST_META_PACKED_AT" \
+      "$(_json_str_v2 "$ST_PUSH_COMMIT")" "$ST_PUSHED_AT"
+    # corp (null при unknown-без-данных: rc≠0)
+    if (( rc == 0 )); then
+      local fok="$CTX_FETCH_OK"; [[ "$fok" == true ]] || fok=false
+      local imrg="$CTX_IN_MERGE"; [[ "$imrg" == true ]] || imrg=false
+      printf '"corp":{"snapshot_at":%s,"fetch_ok":%s,"base_branch":"%s","base_sha":"%s","base_date":%s,"repo_dirty":%s,"in_merge":%s,' \
+        "$CTX_SNAPSHOT_AT" "$fok" "$(_json_str_v2 "$CTX_BASE_BRANCH")" \
+        "$(_json_str_v2 "$CTX_BASE_SHA")" "$CTX_BASE_DATE" "$CTX_REPO_DIRTY" "$imrg"
+      printf '"undelivered":['
+      local ufirst=1 uname uahead
+      if [[ -n "$CTX_UNDELIVERED" ]]; then
+        while IFS=$'\t' read -r uname uahead || [[ -n "$uname" ]]; do
+          [[ -n "$uname" ]] || continue
+          if (( ufirst )); then ufirst=0; else printf ','; fi
+          printf '{"name":"%s","ahead":%s}' "$(_json_str_v2 "$uname")" "$uahead"
+        done <<< "$CTX_UNDELIVERED"
+      fi
+      printf ']},'
+    else
+      printf '"corp":null,'
+    fi
+    printf '"compared_at":%s}' "$now"
+    rm -rf "$d"
+  done
+  printf '\n]\n'
+  return 0
+}
 
 # cmd_ctx [проект] [--json] — вердикт готовности к доставке (дом).
 cmd_ctx() {
