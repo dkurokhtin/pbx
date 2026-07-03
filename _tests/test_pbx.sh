@@ -1540,10 +1540,10 @@ test_cmd_ctx_renders_verdict() {
   local ws; ws="$(make_ws)"
   local out rc=0
   # снимок в зеркало (на «ноуте»), затем ctx (на «дому»)
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
   assert_eq "ctx-фикстура: snapshot rc=0" "$rc" "0"
   rc=0
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
   assert_eq  "ctx: rc=0"                    "$rc" "0"
   assert_has "ctx: вердикт danger в выводе" "$out" "danger"
   assert_has "ctx: причина отставания"      "$out" "отстал"
@@ -1557,16 +1557,16 @@ test_cmd_ctx_render_glyphs() {
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   local ws; ws="$(make_ws)"
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
   local out
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
   assert_has "ctx-глифы: 🔴 у danger-проекта"        "$out" "🔴 proj"
   assert_has "ctx-глифы: ✗-префикс danger-причины"  "$out" "✗"
-  # обновление дома + пересоздание снимка → warn, без ✗
+  # обновление дома + пересоздание снимка → ok (🟢)
   ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
-  assert_no  "ctx-глифы: нет 🔴 после обновления"    "$out" "🔴 proj"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  assert_has "ctx-глифы: 🟢 после обновления"        "$out" "🟢 proj"
   assert_no  "ctx-глифы: нет ✗ после обновления"     "$out" "✗"
   rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
 }
@@ -1589,9 +1589,9 @@ test_cmd_ctx_all_skips_no_mirror() {
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   printf 'SRC=%s\n' "$CTX_SRC" > "$reg/nomirror.conf"
   local ws; ws="$(make_ws)"
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
   local out rc=0
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
   assert_eq  "ctx all: rc=0"                     "$rc" "0"
   assert_has "ctx all: проект с MIRROR обработан" "$out" "proj"
   assert_no  "ctx all: без MIRROR не в обходе"    "$out" "nomirror"
