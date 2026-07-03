@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (12) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (14) завершает без действий
   local rc=0
-  ( printf '12\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (12) → rc=0" "$rc" "0"
+  ( printf '14\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (14) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -433,9 +433,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 7 = status → вывод → Enter (menu_pause) → 12 = выход
+  # 8 = status → вывод → Enter (menu_pause) → 14 = выход
   local out
-  out="$( ( printf '7\n\n12\n' | {
+  out="$( ( printf '8\n\n14\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -1864,6 +1864,63 @@ test_selfupdate_in_help() {
   assert_has "help: self-update упомянут" "$out" "self-update"
 }
 
+# --- Task 6: self-update hint при snapshot, self.rev в diag, пункты меню ---
+test_selfupdate_hint_in_snapshot() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # «зеркало pbx» с более свежим SHA, чем в self.rev
+  local sm="$CE_BASE/selfmirror.git"
+  git init -q --bare "$sm"
+  local w="$CE_BASE/sw"
+  ( git init -q -b main "$w" && cd "$w" && git config user.email t@t \
+    && git config user.name t && cp "$PBX" pbx && git add -A \
+    && git commit -qm v2 && git push -q "$sm" main ) >/dev/null 2>&1
+  local xdg="$CE_BASE/xdg"; mkdir -p "$xdg/pbx"
+  printf 'SELF_MIRROR=%s\n' "$sm" > "$xdg/pbx/self.conf"
+  printf 'SELF_SHA=%s\n' "0000000000000000000000000000000000000000" > "$xdg/pbx/self.rev"
+  # плейн-режим: подсказки быть НЕ должно (TTY-only), snapshot работает как раньше
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq "hint: snapshot rc=0"                    "$rc" "0"
+  assert_no "hint: plain-вывод без подсказки (TTY-only)" "$out" "self-update"
+  # сам хелпер: под форсированным UI_COLOR_OUT печатает подсказку
+  local hint
+  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)"
+  assert_has "hint: при расхождении SHA есть подсказка" "$hint" "self-update"
+  # совпадение SHA → подсказки нет
+  printf 'SELF_SHA=%s\n' "$(git -C "$sm" rev-parse main)" > "$xdg/pbx/self.rev"
+  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)"
+  assert_no "hint: SHA совпал — подсказки нет" "$hint" "self-update"
+  # сбой ls-remote (битый URL) → молча rc=0
+  printf 'SELF_MIRROR=%s\n' "$CE_BASE/nope.git" > "$xdg/pbx/self.conf"
+  local hrc=0
+  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)" || hrc=$?
+  assert_eq "hint: сбой сети — rc=0"     "$hrc" "0"
+  assert_no "hint: сбой сети — молчит"   "$hint" "self-update"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_diag_selfrev_line() {
+  _mk_selfupdate_fixture
+  local xdg="$SU_BASE/xdg"; mkdir -p "$xdg/pbx"
+  printf 'SELF_SHA=%s\nUPDATED_AT=1751500000\n' "abc1234abc1234abc1234abc1234abc1234abc12" > "$xdg/pbx/self.rev"
+  local out
+  out="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; collect_diag' 2>/dev/null)"
+  assert_has "diag: строка self.rev" "$out" "self.rev"
+  # без self.rev строка отсутствует (plain-инвариант прежних машин)
+  out="$(XDG_CONFIG_HOME="$SU_BASE/empty" bash -c 'source "'"$PBX"'"; collect_diag' 2>/dev/null)"
+  assert_no "diag: без self.rev строки нет" "$out" "self.rev"
+  rm -rf "$SU_BASE"
+}
+
+test_menu_has_ctx_and_selfupdate() {
+  # меню: пункт 5 — ctx (после corp), пункт 11 — self-update; выход — последний
+  local out
+  out="$(printf '14\n' | bash -c 'source "'"$PBX"'"; UI_TTY=1 TERM=xterm cmd_menu' 2>&1 || true)"
+  assert_has "меню: пункт ctx"         "$out" "ctx"
+  assert_has "меню: пункт self-update" "$out" "self-update"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2423,9 +2480,9 @@ test_menu_snapshot_runs_and_exits() {
 }
 
 test_menu_corp_returns_to_menu() {
-  # 5 = corp (read-only) → Enter (menu_pause) → 12 = выход
+  # 5 = corp (read-only) → Enter (menu_pause) → 14 = выход
   local ws reg out; ws="$(make_ws)"; reg="$(make_ws)"
-  out="$( ( printf '5\n\n12\n' | {
+  out="$( ( printf '5\n\n14\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -2610,6 +2667,9 @@ test_selfupdate_rejects_syntax_error_with_decoy_main
 test_selfupdate_git_workspace_refuses
 test_selfupdate_preserves_mode
 test_selfupdate_in_help
+test_selfupdate_hint_in_snapshot
+test_diag_selfrev_line
+test_menu_has_ctx_and_selfupdate
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

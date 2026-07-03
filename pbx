@@ -1101,6 +1101,7 @@ cmd_snapshot() {
     local sha
     sha="$(snapshot_push "$REPO" "$MIRROR" "$project")" || die "pbx snapshot не удался (см. вывод выше)"
     c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    self_update_hint
     return 0
   fi
 
@@ -1130,6 +1131,7 @@ cmd_snapshot() {
     fi
   done
   c_blue "🔵 Итог: $snapped снято, $skipped пропущено, $failed с ошибками"
+  self_update_hint
   if (( failed > 0 && snapped == 0 )); then return 1; fi
   return 0
 }
@@ -1780,6 +1782,11 @@ collect_diag() {
     commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo '—')"
     [[ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]] && commit="$commit+dirty"
     printf '[pbx]     script=%s commit=%s\n' "$real" "$commit"
+    if [[ -f "$SELF_REV_FILE" ]]; then
+      printf '[pbx]     self.rev=%s updated=%s\n' \
+        "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)" \
+        "$(date -d "@$(sed -n 's/^UPDATED_AT=//p' "$SELF_REV_FILE" | head -1)" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
+    fi
 
     # [env] — WSL, версии инструментов, ключевые пути, PBX_* env
     local wsl=no; grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && wsl=yes
@@ -2059,6 +2066,25 @@ cmd_self_update() {
     c_green "✅ pbx обновлён: ${cur:0:7} → ${sha:0:7} (бэкап: $real.bak)"
   else
     c_green "✅ pbx установлен: ${sha:0:7} (бэкап: $real.bak)"
+  fi
+  return 0
+}
+
+# Тихая проверка свежести pbx (конец успешного snapshot — сеть там есть).
+# Best-effort: любой сбой молчит; вывод только TTY (ui_dim); rc всегда 0.
+self_update_hint() {
+  (( UI_COLOR_OUT )) || return 0
+  local mirror branch cur ls_out sha
+  mirror="$(self_mirror_url)"
+  [[ -n "$mirror" ]] || return 0
+  [[ -f "$SELF_REV_FILE" ]] || return 0
+  cur="$(strip_cr "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)")"
+  [[ -n "$cur" ]] || return 0
+  branch="$(self_branch_name)"
+  ls_out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote "$mirror" "refs/heads/$branch" 2>/dev/null)" || return 0
+  sha="${ls_out%%$'\t'*}"
+  if [[ -n "$sha" && "$sha" != "$cur" ]]; then
+    ui_dim "доступно обновление pbx: pbx self-update"
   fi
   return 0
 }
@@ -2404,11 +2430,13 @@ cmd_menu() {
     'deliver — доставить архив в репо (ветка + MR)'
     'snapshot — снимок корп-состояния в зеркало (ноут)'
     'corp    — корп-состояние проектов (дом)'
+    'ctx     — вердикт дом↔корп: готовность к доставке (дом)'
     'log     — диагностика проекта'
     'status  — сводка по проектам'
     'list    — список проектов'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
+    'self-update — обновить pbx из зеркала (ноут)'
     'help    — справка'
     'выход'
   )
@@ -2420,13 +2448,15 @@ cmd_menu() {
       2) if menu_project_flow deliver; then return 0; fi ;;
       3) cmd_snapshot || true; return 0 ;;
       4) cmd_corp || true; menu_pause ;;
-      5) menu_project_flow log || true ;;
-      6) cmd_status; menu_pause ;;
-      7) cmd_list; menu_pause ;;
-      8) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      9) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      10) cmd_help; menu_pause ;;
-      11) return 0 ;;
+      5) cmd_ctx || true; menu_pause ;;
+      6) menu_project_flow log || true ;;
+      7) cmd_status; menu_pause ;;
+      8) cmd_list; menu_pause ;;
+      9) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      10) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      11) cmd_self_update || true; menu_pause ;;
+      12) cmd_help; menu_pause ;;
+      13) return 0 ;;
     esac
   done
 }
