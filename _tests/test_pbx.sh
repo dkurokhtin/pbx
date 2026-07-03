@@ -1883,20 +1883,23 @@ test_selfupdate_hint_in_snapshot() {
   out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
   assert_eq "hint: snapshot rc=0"                    "$rc" "0"
   assert_no "hint: plain-вывод без подсказки (TTY-only)" "$out" "self-update"
-  # сам хелпер: под форсированным UI_COLOR_OUT печатает подсказку
+  # реальная точка вызова: cmd_snapshot (одиночный проект) под форсированным UI_COLOR_OUT
   local hint
-  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)"
-  assert_has "hint: при расхождении SHA есть подсказка" "$hint" "self-update"
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
+  assert_has "hint: при расхождении SHA есть подсказка (через cmd_snapshot)" "$hint" "self-update"
   # совпадение SHA → подсказки нет
   printf 'SELF_SHA=%s\n' "$(git -C "$sm" rev-parse main)" > "$xdg/pbx/self.rev"
-  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)"
-  assert_no "hint: SHA совпал — подсказки нет" "$hint" "self-update"
-  # сбой ls-remote (битый URL) → молча rc=0
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
+  assert_no "hint: SHA совпал — подсказки нет (через cmd_snapshot)" "$hint" "self-update"
+  # сбой ls-remote (битый URL) → молча, cmd_snapshot всё равно rc=0
   printf 'SELF_MIRROR=%s\n' "$CE_BASE/nope.git" > "$xdg/pbx/self.conf"
   local hrc=0
-  hint="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; self_update_hint' 2>/dev/null)" || hrc=$?
-  assert_eq "hint: сбой сети — rc=0"     "$hrc" "0"
-  assert_no "hint: сбой сети — молчит"   "$hint" "self-update"
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)" || hrc=$?
+  assert_eq "hint: сбой сети — rc=0 (через cmd_snapshot)"   "$hrc" "0"
+  assert_no "hint: сбой сети — молчит (через cmd_snapshot)" "$hint" "self-update"
   rm -rf "$CE_BASE" "$SN_REG" "$ws"
 }
 
