@@ -442,7 +442,6 @@ test_cmd_ctx_renders_verdict() {
   _mk_ctx_fixture
   # зеркало со снимком: реюз snap-фикстуры вручную
   local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
-  ( PBX_REGISTRY_DIR_SAVE="$PBX_REGISTRY_DIR" )
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   local ws; ws="$(make_ws)"
