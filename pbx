@@ -420,12 +420,13 @@ status_collect() {
     [[ "$ST_META_COMMIT" == '-' ]] && ST_META_COMMIT=''
     [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
     [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
-    [[ -n "$ST_META_PACKED_AT" ]] || ST_META_PACKED_AT=-1
+    [[ "$ST_META_DIRTY" =~ ^-?[0-9]+$ ]] || ST_META_DIRTY=-1
+    [[ "$ST_META_PACKED_AT" =~ ^-?[0-9]+$ ]] || ST_META_PACKED_AT=-1
     ST_PUSH_BRANCH="$(sed -n 's/^PUSH_BRANCH=//p' "$meta")"
     ST_PUSH_COMMIT="$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"
     ST_PUSHED_AT="$(sed -n 's/^PUSHED_AT=//p' "$meta")"
     ST_PUSH_SOURCE="$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$meta")"
-    [[ -n "$ST_PUSHED_AT" ]] || ST_PUSHED_AT=-1
+    [[ "$ST_PUSHED_AT" =~ ^-?[0-9]+$ ]] || ST_PUSHED_AT=-1
   fi
 
   # дрейф от последнего pack
@@ -1100,6 +1101,7 @@ cmd_snapshot() {
     local sha
     sha="$(snapshot_push "$REPO" "$MIRROR" "$project")" || die "pbx snapshot не удался (см. вывод выше)"
     c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    self_update_hint
     return 0
   fi
 
@@ -1129,6 +1131,7 @@ cmd_snapshot() {
     fi
   done
   c_blue "🔵 Итог: $snapped снято, $skipped пропущено, $failed с ошибками"
+  self_update_hint
   if (( failed > 0 && snapped == 0 )); then return 1; fi
   return 0
 }
@@ -1301,6 +1304,301 @@ cmd_corp() {
       2) c_warn "  $pr: снимка ещё нет — запусти на ноуте: pbx snapshot $pr" ;;
       *) c_warn "  $pr: зеркало недоступно ($MIRROR) — VPN/PAT/URL?" ;;
     esac
+    rm -rf "$d"
+  done
+  return 0
+}
+
+# =============================================================================
+#  ctx (Э4): автосравнение дом↔корп с вердиктом готовности к доставке.
+#  Композиция живых конвейеров: status_collect (дом) + corp_read_state (снимок
+#  pbx/state зеркала) → ctx_compare → вердикт ok/warn/danger/unknown + причины.
+# =============================================================================
+
+# Порог свежести снимка (сек) — как в corp_render_project (24 ч).
+PBX_CTX_STALE_SEC=86400
+
+# _ctx_reason <code> <level:danger|warn|info> <msg> — причина + эскалация вердикта.
+# info вердикт не поднимает; unknown ставится только явно в ctx_compare.
+_ctx_reason() {
+  CTX_REASONS+="$1"$'\t'"$2"$'\t'"$3"$'\n'
+  case "$2" in
+    danger) CTX_VERDICT='danger' ;;
+    warn)   [[ "$CTX_VERDICT" != danger ]] && CTX_VERDICT='warn' ;;
+  esac
+  return 0
+}
+
+# ctx_compare <state-dir> <rc> — заполняет CTX_*-глобали.
+# rc: 0 — state-файлы в каталоге валидны; 2 — снимка нет; 3 — зеркало
+# недоступно; 4 — нет MIRROR. Требует ST_* (status_collect) при rc=0.
+# Вердикт при сомнении — в сторону строгости (fail-closed).
+ctx_compare() {
+  local d="$1" rc="$2"
+  CTX_VERDICT='ok'; CTX_BEHIND_N=-1; CTX_REASONS=''
+  CTX_SNAPSHOT_AT=-1; CTX_FETCH_OK=''; CTX_BASE_BRANCH=''; CTX_BASE_SHA=''
+  CTX_BASE_DATE=-1; CTX_REPO_DIRTY=-1; CTX_IN_MERGE=''; CTX_UNDELIVERED=''
+
+  case "$rc" in
+    4) _ctx_reason no_mirror warn 'нет MIRROR в реестре — корп-данных нет'
+       CTX_VERDICT='unknown'; return 0 ;;
+    2) _ctx_reason no_snapshot warn 'снимка ещё нет — запусти на ноуте: pbx snapshot'
+       CTX_VERDICT='unknown'; return 0 ;;
+    0) ;;
+    *) _ctx_reason mirror_unreachable warn 'зеркало недоступно (VPN/PAT/URL?)'
+       CTX_VERDICT='unknown'; return 0 ;;
+  esac
+
+  # корп-картина из state.env (читатели sed, как corp_render_project)
+  CTX_SNAPSHOT_AT="$(sed -n 's/^GENERATED_AT=//p' "$d/state.env")"
+  [[ "$CTX_SNAPSHOT_AT" =~ ^[0-9]+$ ]] || CTX_SNAPSHOT_AT=-1
+  CTX_FETCH_OK="$(sed -n 's/^FETCH_OK=//p' "$d/state.env")"
+  CTX_BASE_BRANCH="$(sed -n 's/^BASE_BRANCH=//p' "$d/state.env")"
+  CTX_BASE_SHA="$(sed -n 's/^BASE_SHA=//p' "$d/state.env")"
+  [[ "$CTX_BASE_SHA" == '-' ]] && CTX_BASE_SHA=''
+  CTX_BASE_DATE="$(sed -n 's/^BASE_DATE=//p' "$d/state.env")"
+  [[ "$CTX_BASE_DATE" =~ ^-?[0-9]+$ ]] || CTX_BASE_DATE=-1
+  CTX_REPO_DIRTY="$(sed -n 's/^DIRTY=//p' "$d/state.env")"
+  [[ "$CTX_REPO_DIRTY" =~ ^-?[0-9]+$ ]] || CTX_REPO_DIRTY=-1
+  CTX_IN_MERGE="$(sed -n 's/^IN_MERGE=//p' "$d/state.env")"
+
+  # недоставленное: ветки с ahead>0 (branches.tsv: name where sha7 ahead …)
+  local bname bwhere bsha7 bahead _rest
+  if [[ -s "$d/branches.tsv" ]]; then
+    while IFS=$'\t' read -r bname bwhere bsha7 bahead _rest || [[ -n "$bname" ]]; do
+      [[ -n "$bname" ]] || continue
+      [[ "$bahead" =~ ^[0-9]+$ ]] || continue
+      (( bahead > 0 )) && CTX_UNDELIVERED+="$bname"$'\t'"$bahead"$'\n'
+    done < "$d/branches.tsv"
+  fi
+
+  if [[ "$ST_GIT" != true ]]; then
+    _ctx_reason src_not_git warn 'SRC не git — сравнение историй невозможно'
+    CTX_VERDICT='unknown'
+    return 0
+  fi
+
+  # --- ключевая проверка (SUP-2603): tip корп-dev достижим из дома? ----------
+  if [[ -n "$CTX_BASE_SHA" ]]; then
+    if ! git -C "$ST_SRC" merge-base --is-ancestor "$CTX_BASE_SHA" HEAD 2>/dev/null; then
+      # отставание: первый из 20 сокращённых SHA корп-лога, найденный дома
+      # (строка 1 = сам tip, уже проверен; неоднозначный короткий SHA даёт
+      # ошибку merge-base → «не найден» — строгая сторона)
+      local n=-1 i=0 lsha _ld _ls
+      while IFS=$'\t' read -r lsha _ld _ls || [[ -n "$lsha" ]]; do
+        [[ -n "$lsha" ]] || continue
+        i=$((i+1))
+        (( i == 1 )) && continue
+        if git -C "$ST_SRC" merge-base --is-ancestor "$lsha" HEAD 2>/dev/null; then
+          n=$((i-1)); break
+        fi
+      done < "$d/log.tsv"
+      if (( n > 0 )); then
+        CTX_BEHIND_N=$n
+        _ctx_reason home_behind_corp danger \
+          "дом отстал от корп-dev на $n коммит(ов) — обнови SRC перед доставкой"
+      else
+        _ctx_reason histories_unrelated warn \
+          'не удалось сопоставить истории дом↔корп (отставание >20 или разные репо)'
+      fi
+    fi
+  else
+    _ctx_reason no_base warn 'в снимке нет базовой ветки — сравнение недоступно'
+  fi
+
+  # --- свежесть снимка --------------------------------------------------------
+  local now; now="$(date +%s)"
+  if [[ "$CTX_SNAPSHOT_AT" != -1 ]] && (( now - CTX_SNAPSHOT_AT > PBX_CTX_STALE_SEC )); then
+    _ctx_reason snapshot_stale warn \
+      "снимок протух (>24 ч) — обнови на ноуте: pbx snapshot"
+  fi
+  if [[ -n "$CTX_FETCH_OK" && "$CTX_FETCH_OK" != true ]]; then
+    _ctx_reason snapshot_no_vpn warn \
+      'снимок делался без связи с gitlab (fetch_ok=false) — корп-данные могут отставать'
+  fi
+
+  # --- состояние REPO на ноуте -------------------------------------------------
+  if [[ "$CTX_REPO_DIRTY" != -1 ]] && (( CTX_REPO_DIRTY > 0 )); then
+    _ctx_reason repo_dirty warn "корп-репо на ноуте грязный ($CTX_REPO_DIRTY правок) — доставка встанет"
+  fi
+  if [[ "$CTX_IN_MERGE" == true ]]; then
+    _ctx_reason repo_in_merge warn 'корп-репо в незавершённом merge — доставка встанет'
+  fi
+
+  # --- гигиена транспорта дома --------------------------------------------------
+  if [[ -n "$ST_PUSH_COMMIT" && -n "$ST_PUSH_SOURCE" ]]; then
+    local head_now
+    head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]]; then
+      _ctx_reason push_stale warn \
+        'push-снапшот в зеркале отстаёт от SRC — сделай pbx push перед доставкой'
+    fi
+  fi
+  if [[ "$ST_ARCHIVE_EXISTS" == true && "$ST_STALE" == true ]]; then
+    _ctx_reason pack_stale warn 'архив протух — сделай pbx pack перед доставкой'
+  fi
+
+  # --- информация (вердикт не меняет) -------------------------------------------
+  if [[ -n "$CTX_UNDELIVERED" ]]; then
+    local u_cnt
+    u_cnt="$(printf '%s' "$CTX_UNDELIVERED" | grep -c . || true)"
+    _ctx_reason undelivered_branches info \
+      "в корп есть недоставленное/невлитое: $u_cnt ветк(и) с ahead>0"
+  fi
+
+  return 0
+}
+
+# ctx_render_project <проект> — человекочитаемая секция вердикта (по CTX_*/ST_*).
+ctx_render_project() {
+  local p="$1"
+  local mark
+  case "$CTX_VERDICT" in
+    ok)      mark='🟢' ;;
+    warn)    mark='🟡' ;;
+    danger)  mark='🔴' ;;
+    *)       mark='⚪' ;;
+  esac
+  printf '%s %s — %s\n' "$mark" "$p" "$CTX_VERDICT"
+  local code level msg
+  while IFS=$'\t' read -r code level msg || [[ -n "$code" ]]; do
+    [[ -n "$code" ]] || continue
+    case "$level" in
+      danger) c_red  "    ✗ $msg" ;;
+      warn)   c_warn "    ! $msg" ;;
+      *)      printf '    · %s\n' "$msg" ;;
+    esac
+  done <<< "$CTX_REASONS"
+  local uname uahead
+  if [[ -n "$CTX_UNDELIVERED" ]]; then
+    while IFS=$'\t' read -r uname uahead || [[ -n "$uname" ]]; do
+      [[ -n "$uname" ]] || continue
+      printf '      %s ahead=%s\n' "$(pad "$uname" 34)" "$uahead"
+    done <<< "$CTX_UNDELIVERED"
+  fi
+  return 0
+}
+
+# ctx_json <проект>… — JSON-массив вердиктов (схема — спека Э4 §3.3;
+# порядок ключей фиксирован — контракт для ИИ).
+ctx_json() {
+  local p first=1 d rc
+  local now; now="$(date +%s)"
+  printf '['
+  for p in "$@"; do
+    load_config "$p"
+    status_collect "$p"
+    d="$(mktemp -d -t pbx-ctx.XXXXXX)"
+    rc=0
+    if [[ -z "${MIRROR:-}" ]]; then
+      rc=4
+    else
+      corp_read_state "$MIRROR" "$d" || rc=$?
+    fi
+    ctx_compare "$d" "$rc"
+    if (( first )); then first=0; else printf ','; fi
+    printf '\n  {"name":"%s","verdict":"%s","behind_n":%s,' \
+      "$(_json_str_v2 "$p")" "$CTX_VERDICT" "$CTX_BEHIND_N"
+    # reasons
+    printf '"reasons":['
+    local rfirst=1 code level msg
+    if [[ -n "$CTX_REASONS" ]]; then
+      while IFS=$'\t' read -r code level msg || [[ -n "$code" ]]; do
+        [[ -n "$code" ]] || continue
+        if (( rfirst )); then rfirst=0; else printf ','; fi
+        printf '{"code":"%s","level":"%s","msg":"%s"}' \
+          "$code" "$level" "$(_json_str_v2 "$msg")"
+      done <<< "$CTX_REASONS"
+    fi
+    printf '],'
+    # home
+    local head_now=''
+    [[ "$ST_GIT" == true ]] && head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+    printf '"home":{"branch":"%s","dirty":%s,"head":"%s","meta_commit":"%s","packed_at":%s,"push_commit":"%s","pushed_at":%s},' \
+      "$(_json_str_v2 "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str_v2 "$head_now")" \
+      "$(_json_str_v2 "$ST_META_COMMIT")" "$ST_META_PACKED_AT" \
+      "$(_json_str_v2 "$ST_PUSH_COMMIT")" "$ST_PUSHED_AT"
+    # corp (null при unknown-без-данных: rc≠0)
+    if (( rc == 0 )); then
+      local fok="$CTX_FETCH_OK"; [[ "$fok" == true ]] || fok=false
+      local imrg="$CTX_IN_MERGE"; [[ "$imrg" == true ]] || imrg=false
+      printf '"corp":{"snapshot_at":%s,"fetch_ok":%s,"base_branch":"%s","base_sha":"%s","base_date":%s,"repo_dirty":%s,"in_merge":%s,' \
+        "$CTX_SNAPSHOT_AT" "$fok" "$(_json_str_v2 "$CTX_BASE_BRANCH")" \
+        "$(_json_str_v2 "$CTX_BASE_SHA")" "$CTX_BASE_DATE" "$CTX_REPO_DIRTY" "$imrg"
+      printf '"undelivered":['
+      local ufirst=1 uname uahead
+      if [[ -n "$CTX_UNDELIVERED" ]]; then
+        while IFS=$'\t' read -r uname uahead || [[ -n "$uname" ]]; do
+          [[ -n "$uname" ]] || continue
+          if (( ufirst )); then ufirst=0; else printf ','; fi
+          printf '{"name":"%s","ahead":%s}' "$(_json_str_v2 "$uname")" "$uahead"
+        done <<< "$CTX_UNDELIVERED"
+      fi
+      printf ']},'
+    else
+      printf '"corp":null,'
+    fi
+    printf '"compared_at":%s}' "$now"
+    rm -rf "$d"
+  done
+  printf '\n]\n'
+  return 0
+}
+
+# cmd_ctx [проект] [--json] — вердикт готовности к доставке (дом).
+cmd_ctx() {
+  local project='' json=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "Неизвестный флаг: $a (ожидается --json)" ;;
+      *) [[ -n "$project" ]] && die "Лишний аргумент: $a (проект указывается один)"; project="$a" ;;
+    esac
+  done
+  if [[ -n "$project" ]]; then
+    PBX_CURRENT_PROJECT="$project"
+    valid_project "$project"
+    if (( ! json )); then
+      load_config "$project"
+      [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project'. Добавь MIRROR=git@github.com:<user>/<repo>.git в $PBX_REGISTRY_DIR/$project.conf"
+    fi
+  fi
+
+  local -a names=()
+  if [[ -n "$project" ]]; then
+    names=("$project")
+  else
+    local p
+    while IFS= read -r p; do
+      load_config "$p"
+      [[ -n "${MIRROR:-}" ]] && names+=("$p")
+    done < <(list_projects)
+  fi
+
+  if (( json )); then
+    ctx_json ${names[@]+"${names[@]}"}
+    return 0
+  fi
+
+  ui_section "Вердикт дом↔корп" "🔵 Вердикт дом↔корп:"
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов с MIRROR не найдено — задай MIRROR= в реестре)"
+    return 0
+  fi
+  local pr d rc
+  for pr in "${names[@]}"; do
+    load_config "$pr"
+    status_collect "$pr"
+    d="$(mktemp -d -t pbx-ctx.XXXXXX)"
+    rc=0
+    if [[ -z "${MIRROR:-}" ]]; then
+      rc=4
+    else
+      corp_read_state "$MIRROR" "$d" || rc=$?
+    fi
+    ctx_compare "$d" "$rc"
+    ctx_render_project "$pr"
     rm -rf "$d"
   done
   return 0
@@ -1484,6 +1782,11 @@ collect_diag() {
     commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo '—')"
     [[ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]] && commit="$commit+dirty"
     printf '[pbx]     script=%s commit=%s\n' "$real" "$commit"
+    if [[ -f "$SELF_REV_FILE" ]]; then
+      printf '[pbx]     self.rev=%s updated=%s\n' \
+        "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)" \
+        "$(date -d "@$(sed -n 's/^UPDATED_AT=//p' "$SELF_REV_FILE" | head -1)" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
+    fi
 
     # [env] — WSL, версии инструментов, ключевые пути, PBX_* env
     local wsl=no; grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && wsl=yes
@@ -1649,6 +1952,143 @@ cmd_scan() {
   return 0
 }
 
+# =============================================================================
+#  self-update (Э4): обновление pbx из личного GitHub-зеркала инструмента.
+#  Источник: SELF_MIRROR в $SELF_CONF (env PBX_SELF_MIRROR побеждает).
+#  Версия установленного: SELF_SHA в $SELF_REV_FILE (meta_update-формат).
+# =============================================================================
+SELF_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pbx/self.conf"
+SELF_REV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/pbx/self.rev"
+
+# URL зеркала pbx: env → self.conf; пусто, если не настроен.
+self_mirror_url() {
+  if [[ -n "${PBX_SELF_MIRROR:-}" ]]; then
+    strip_cr "$PBX_SELF_MIRROR"; return 0
+  fi
+  [[ -f "$SELF_CONF" ]] || return 0
+  strip_cr "$(sed -n 's/^SELF_MIRROR=//p' "$SELF_CONF" | head -1)"
+  return 0
+}
+
+# Ветка зеркала pbx: env → self.conf → main.
+self_branch_name() {
+  if [[ -n "${PBX_SELF_BRANCH:-}" ]]; then
+    strip_cr "$PBX_SELF_BRANCH"; return 0
+  fi
+  local b=''
+  [[ -f "$SELF_CONF" ]] && b="$(sed -n 's/^SELF_BRANCH=//p' "$SELF_CONF" | head -1)"
+  strip_cr "${b:-main}"
+  return 0
+}
+
+cmd_self_update() {
+  local check=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --check) check=1 ;;
+      *) die "Неизвестный аргумент: $a (ожидается --check)" ;;
+    esac
+  done
+
+  local mirror branch
+  mirror="$(self_mirror_url)"
+  branch="$(self_branch_name)"
+  [[ -n "$mirror" ]] || die "Не задан SELF_MIRROR. Создай $SELF_CONF со строкой SELF_MIRROR=https://github.com/<user>/pbx.git (или env PBX_SELF_MIRROR)"
+
+  # установленный скрипт (резолв симлинка /usr/local/bin/pbx)
+  local self real
+  self="${BASH_SOURCE[0]}"
+  real="$(readlink -f "$self" 2>/dev/null || echo "$self")"
+  # fail-closed: скрипт в git-worktree (дом, рабочая копия) не трогаем
+  if [[ "$(git -C "$(dirname "$real")" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]]; then
+    die "Это рабочая копия в git ($real) — обновляйся здесь через git pull, не self-update"
+  fi
+
+  ui_section "Self-update" "🔵 pbx self-update"
+  ui_kv MIRROR "$mirror"
+  ui_kv BRANCH "$branch"
+
+  local tmp; tmp="$(mktemp -d -t pbx-selfupd.XXXXXX)" || die "mktemp не удался"
+  if ! git init -q "$tmp" 2>/dev/null \
+     || ! GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$tmp" fetch -q --depth 1 "$mirror" "$branch" 2>/dev/null; then
+    rm -rf "$tmp"
+    die "Зеркало pbx недоступно: $mirror ($branch) — VPN/PAT/URL?"
+  fi
+  local sha
+  sha="$(git -C "$tmp" rev-parse FETCH_HEAD 2>/dev/null || true)"
+  _pbx_is_sha "$sha" || { rm -rf "$tmp"; die "Не удалось получить SHA из зеркала"; }
+
+  local cur=''
+  [[ -f "$SELF_REV_FILE" ]] && cur="$(strip_cr "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)")"
+
+  if (( check )); then
+    c_blue "🔵 установлено: ${cur:-неизвестно}; в зеркале: $sha"
+    if [[ "$sha" == "$cur" ]]; then
+      c_green "✅ pbx свежий"
+    else
+      c_warn "⚠️  доступно обновление: pbx self-update"
+    fi
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  if [[ "$sha" == "$cur" ]]; then
+    c_green "✅ pbx уже свежий (${sha:0:7})"
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  # кандидат: файл pbx из дерева FETCH_HEAD + валидация (fail-closed)
+  if ! git -C "$tmp" cat-file blob "FETCH_HEAD:pbx" > "$tmp/pbx.new" 2>/dev/null; then
+    rm -rf "$tmp"; die "В зеркале нет файла pbx (ветка $branch)"
+  fi
+  if ! bash -n "$tmp/pbx.new" 2>/dev/null; then
+    rm -rf "$tmp"; die "Кандидат не проходит bash -n — обновление отменено, скрипт не тронут"
+  fi
+  if ! grep -q '^main() {' "$tmp/pbx.new"; then
+    rm -rf "$tmp"; die "Кандидат не похож на pbx (нет диспетчера main) — отменено"
+  fi
+
+  cp -- "$real" "$real.bak" 2>/dev/null || { rm -rf "$tmp"; die "Не удалось сделать бэкап $real.bak"; }
+  # атомарная замена: staged-файл РЯДОМ (та же ФС) + mv (inode swap —
+  # безопасно для исполняющегося bash-скрипта)
+  local staged="$real.new.$$"
+  if ! { cp -- "$tmp/pbx.new" "$staged" && chmod --reference="$real" "$staged" && mv -f -- "$staged" "$real"; } 2>/dev/null; then
+    rm -f -- "$staged" 2>/dev/null
+    rm -rf "$tmp"
+    die "Замена $real не удалась (бэкап цел: $real.bak)"
+  fi
+  rm -rf "$tmp"
+  mkdir -p "$(dirname "$SELF_REV_FILE")" 2>/dev/null || true
+  meta_update "$SELF_REV_FILE" "SELF_SHA=$sha" "UPDATED_AT=$(date +%s)"
+  if [[ -n "$cur" ]]; then
+    c_green "✅ pbx обновлён: ${cur:0:7} → ${sha:0:7} (бэкап: $real.bak)"
+  else
+    c_green "✅ pbx установлен: ${sha:0:7} (бэкап: $real.bak)"
+  fi
+  return 0
+}
+
+# Тихая проверка свежести pbx (конец успешного snapshot — сеть там есть).
+# Best-effort: любой сбой молчит; вывод только TTY (ui_dim); rc всегда 0.
+self_update_hint() {
+  (( UI_COLOR_OUT )) || return 0
+  local mirror branch cur ls_out sha
+  mirror="$(self_mirror_url)"
+  [[ -n "$mirror" ]] || return 0
+  [[ -f "$SELF_REV_FILE" ]] || return 0
+  cur="$(strip_cr "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)")"
+  [[ -n "$cur" ]] || return 0
+  branch="$(self_branch_name)"
+  ls_out="$(GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote "$mirror" "refs/heads/$branch" 2>/dev/null)" || return 0
+  sha="${ls_out%%$'\t'*}"
+  if [[ -n "$sha" && "$sha" != "$cur" ]]; then
+    ui_dim "доступно обновление pbx: pbx self-update"
+  fi
+  return 0
+}
+
 # ---- help ------------------------------------------------------------------
 cmd_help() {
   if (( ! UI_COLOR_OUT )); then
@@ -1659,6 +2099,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
   pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
+  pbx ctx     [проект] [--json]                 ДОМ: вердикт готовности к доставке (сравнение дом↔корп по снимку); --json — для ИИ
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
@@ -1667,6 +2108,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx status  [проект] [--json]                 сводка: ветка, dirty, дрейф от последнего pack, свежесть архива
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
+  pbx self-update [--check]                     обновить pbx из зеркала инструмента (SELF_MIRROR в ~/.config/pbx/self.conf); --check — только проверить
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
   pbx help                                      эта справка
 
@@ -1683,6 +2125,8 @@ pbx — доставка проектов Pybotx (WSL)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
   PBX_TARGET_BRANCH (=dev)     PBX_FORGE (=gitlab)
   PBX_ASSUME_YES (=0)          пропустить подтверждение deliver-guard (как --yes)
+  PBX_SELF_MIRROR              зеркало pbx для self-update (иначе SELF_MIRROR= из ~/.config/pbx/self.conf)
+  PBX_SELF_BRANCH (=main)      ветка зеркала pbx
 
 Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
   BASE_BRANCH=dev            от какой ветки ответвляемся
@@ -1707,6 +2151,7 @@ ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
   ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → ветка pbx/state зеркала${C_RESET}
   ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
+  ${C_CYAN}pbx ctx${C_RESET}     [проект] [--json]       ${C_DIM}дом: вердикт готовности к доставке (ok/warn/danger)${C_RESET}
   ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
@@ -1714,6 +2159,7 @@ ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
   ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
   ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
+  ${C_CYAN}pbx self-update${C_RESET} [--check]          ${C_DIM}обновить pbx из зеркала (ноут); --check — только проверить${C_RESET}
   ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
   ${C_CYAN}pbx${C_RESET}                                 ${C_DIM}интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)${C_RESET}
 
@@ -1724,6 +2170,7 @@ ${C_BOLD}Примеры${C_RESET}
 
 ${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
             ${C_DIM}PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES PBX_NO_MENU${C_RESET}
+            ${C_DIM}PBX_SELF_MIRROR PBX_SELF_BRANCH${C_RESET}
 
 ${C_DIM}Конфиги и реестр: подробности в plain-справке (pbx help | cat) и README.${C_RESET}
 EOF
@@ -1986,11 +2433,13 @@ cmd_menu() {
     'deliver — доставить архив в репо (ветка + MR)'
     'snapshot — снимок корп-состояния в зеркало (ноут)'
     'corp    — корп-состояние проектов (дом)'
+    'ctx     — вердикт дом↔корп: готовность к доставке (дом)'
     'log     — диагностика проекта'
     'status  — сводка по проектам'
     'list    — список проектов'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
+    'self-update — обновить pbx из зеркала (ноут)'
     'help    — справка'
     'выход'
   )
@@ -2002,13 +2451,15 @@ cmd_menu() {
       2) if menu_project_flow deliver; then return 0; fi ;;
       3) cmd_snapshot || true; return 0 ;;
       4) cmd_corp || true; menu_pause ;;
-      5) menu_project_flow log || true ;;
-      6) cmd_status; menu_pause ;;
-      7) cmd_list; menu_pause ;;
-      8) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      9) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      10) cmd_help; menu_pause ;;
-      11) return 0 ;;
+      5) cmd_ctx || true; menu_pause ;;
+      6) menu_project_flow log || true ;;
+      7) cmd_status; menu_pause ;;
+      8) cmd_list; menu_pause ;;
+      9) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      10) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      11) cmd_self_update || true; menu_pause ;;
+      12) cmd_help; menu_pause ;;
+      13) return 0 ;;
     esac
   done
 }
@@ -2030,6 +2481,8 @@ main() {
     push)               require_wsl; cmd_push "$@" ;;
     snapshot)           cmd_snapshot "$@" ;;
     corp)               cmd_corp "$@" ;;
+    ctx)                cmd_ctx "$@" ;;
+    self-update|selfupdate) cmd_self_update "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;

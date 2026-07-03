@@ -405,10 +405,10 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (12) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (14) завершает без действий
   local rc=0
-  ( printf '12\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (12) → rc=0" "$rc" "0"
+  ( printf '14\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (14) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
@@ -433,9 +433,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 7 = status → вывод → Enter (menu_pause) → 12 = выход
+  # 8 = status → вывод → Enter (menu_pause) → 14 = выход
   local out
-  out="$( ( printf '7\n\n12\n' | {
+  out="$( ( printf '8\n\n14\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -1382,6 +1382,546 @@ test_forge_github() {
   assert_no  "github: без MR-опций"    "$out" "merge_request.create"
   rm -f "$CALLS"
 }
+# --- Э4: pbx ctx — вердикт дом↔корп -------------------------------------------
+# Фикстура: corp-фикстура + домашний SRC (клон origin, отстаёт на 1 коммит) +
+# state-каталог со снимком корп-состояния. Глобали: + CTX_SRC, CTX_STATE
+_mk_ctx_fixture() {
+  _mk_corp_fixture
+  CTX_SRC="$CE_BASE/src"
+  # Дом = клон origin, затем отмотка на 1 коммит назад
+  ( git clone -q "$CE_ORIGIN" "$CTX_SRC" 2>/dev/null \
+    && cd "$CTX_SRC" && git config user.email t@t && git config user.name t \
+    && git checkout -q dev && git reset -q --hard HEAD~1 ) >/dev/null 2>&1
+  CTX_STATE="$(make_ws)"
+  corp_collect_state "$CE_REPO" dev
+  corp_state_files "$CTX_STATE" proj
+}
+
+# Минимальный набор ST_*-глобалей для ctx_compare (без status_collect)
+_ctx_st_defaults() {
+  ST_SRC="$CTX_SRC"; ST_GIT=true
+  ST_PUSH_COMMIT=''; ST_PUSH_SOURCE=''
+  ST_ARCHIVE_EXISTS=false; ST_STALE=false
+}
+
+test_ctx_compare_unknown_cases() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ctx_compare "$CTX_STATE" 4
+  assert_eq  "ctx: rc=4 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина no_mirror"     "$CTX_REASONS" "no_mirror"
+  ctx_compare "$CTX_STATE" 2
+  assert_eq  "ctx: rc=2 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина no_snapshot"   "$CTX_REASONS" "no_snapshot"
+  ctx_compare "$CTX_STATE" 3
+  assert_eq  "ctx: rc=3 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина mirror_unreachable" "$CTX_REASONS" "mirror_unreachable"
+  ST_GIT=false
+  ctx_compare "$CTX_STATE" 0
+  assert_eq  "ctx: SRC не git → unknown"  "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина src_not_git"   "$CTX_REASONS" "src_not_git"
+  assert_has "ctx: corp-поля заполнены и при unknown" "$CTX_BASE_SHA" "$(git -C "$CE_REPO" rev-parse origin/dev)"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_behind_danger() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ctx_compare "$CTX_STATE" 0
+  assert_eq  "ctx: дом отстал → danger"   "$CTX_VERDICT" "danger"
+  assert_has "ctx: причина home_behind_corp" "$CTX_REASONS" "home_behind_corp"
+  assert_eq  "ctx: behind_n = 1"          "$CTX_BEHIND_N" "1"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_ok_when_home_has_tip() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ctx_compare "$CTX_STATE" 0
+  assert_eq "ctx: дом на tip корп-dev → ok" "$CTX_VERDICT" "ok"
+  assert_eq "ctx: behind_n = -1 при ok"     "$CTX_BEHIND_N" "-1"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_unrelated_histories() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  local alien; alien="$(make_ws)"
+  ( git init -q "$alien" && cd "$alien" \
+    && git config user.email a@a && git config user.name a \
+    && echo x > x.txt && git add -A && git commit -qm alien ) >/dev/null 2>&1
+  ST_SRC="$alien"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: несвязанные истории → histories_unrelated" "$CTX_REASONS" "histories_unrelated"
+  assert_eq  "ctx: unrelated — warn, не danger" "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$alien"
+}
+
+test_ctx_compare_no_base_warn() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  sed -i 's/^BASE_SHA=.*/BASE_SHA=-/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: нет base в снимке → no_base" "$CTX_REASONS" "no_base"
+  assert_eq  "ctx: no_base — warn"              "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_snapshot_stale_and_no_vpn() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  sed -i "s/^GENERATED_AT=.*/GENERATED_AT=$(( $(date +%s) - 90000 ))/" "$CTX_STATE/state.env"
+  sed -i 's/^FETCH_OK=.*/FETCH_OK=false/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: снимок >24ч → snapshot_stale" "$CTX_REASONS" "snapshot_stale"
+  assert_has "ctx: fetch_ok=false → snapshot_no_vpn" "$CTX_REASONS" "snapshot_no_vpn"
+  assert_eq  "ctx: два warn → вердикт warn" "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_repo_dirty_and_merge() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  sed -i 's/^DIRTY=.*/DIRTY=3/'        "$CTX_STATE/state.env"
+  sed -i 's/^IN_MERGE=.*/IN_MERGE=true/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: REPO dirty → repo_dirty"      "$CTX_REASONS" "repo_dirty"
+  assert_has "ctx: REPO in merge → repo_in_merge" "$CTX_REASONS" "repo_in_merge"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_push_and_pack_stale() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ST_PUSH_SOURCE="0000000000000000000000000000000000000000"   # != HEAD SRC
+  ST_ARCHIVE_EXISTS=true; ST_STALE=true
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: push отстаёт → push_stale" "$CTX_REASONS" "push_stale"
+  assert_has "ctx: архив протух → pack_stale" "$CTX_REASONS" "pack_stale"
+  assert_eq  "ctx: warn-вердикт"              "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_push_fresh_silent() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ST_PUSH_SOURCE="$(git -C "$CTX_SRC" rev-parse HEAD)"
+  ctx_compare "$CTX_STATE" 0
+  assert_no "ctx: push свежий — молчит" "$CTX_REASONS" "push_stale"
+  assert_eq "ctx: ok"                   "$CTX_VERDICT" "ok"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_undelivered_info() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ctx_compare "$CTX_STATE" 0
+  # фикстура: feature/AAA-1 имеет ahead=1 над dev
+  assert_has "ctx: недоставленная ветка в списке" "$CTX_UNDELIVERED" "feature/AAA-1"
+  assert_has "ctx: info-причина undelivered_branches" "$CTX_REASONS" "undelivered_branches"
+  assert_eq  "ctx: info не поднимает вердикт" "$CTX_VERDICT" "ok"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_danger_beats_warn() {
+  _mk_ctx_fixture; _ctx_st_defaults    # дом отстал (danger)
+  sed -i 's/^FETCH_OK=.*/FETCH_OK=false/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_eq "ctx: danger побеждает warn" "$CTX_VERDICT" "danger"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_cmd_ctx_renders_verdict() {
+  _mk_ctx_fixture
+  # зеркало со снимком: реюз snap-фикстуры вручную
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  local out rc=0
+  # снимок в зеркало (на «ноуте»), затем ctx (на «дому»)
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq "ctx-фикстура: snapshot rc=0" "$rc" "0"
+  rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  assert_eq  "ctx: rc=0"                    "$rc" "0"
+  assert_has "ctx: вердикт danger в выводе" "$out" "danger"
+  assert_has "ctx: причина отставания"      "$out" "отстал"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_render_glyphs() {
+  # глифы вердикта — контракт рендера: 🔴-маркер и ✗/!-префиксы причин
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  assert_has "ctx-глифы: 🔴 у danger-проекта"        "$out" "🔴 proj"
+  assert_has "ctx-глифы: ✗-префикс danger-причины"  "$out" "✗"
+  # обновление дома + пересоздание снимка → ok (🟢)
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  assert_has "ctx-глифы: 🟢 после обновления"        "$out" "🟢 proj"
+  assert_no  "ctx-глифы: нет ✗ после обновления"     "$out" "✗"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_no_mirror_dies_plain() {
+  _mk_ctx_fixture
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/proj.conf"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  assert_eq  "ctx: явный проект без MIRROR → die" "$rc" "1"
+  assert_has "ctx: подсказка про MIRROR"          "$out" "MIRROR"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg"
+}
+
+test_cmd_ctx_all_skips_no_mirror() {
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/nomirror.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
+  assert_eq  "ctx all: rc=0"                     "$rc" "0"
+  assert_has "ctx all: проект с MIRROR обработан" "$out" "proj"
+  assert_no  "ctx all: без MIRROR не в обходе"    "$out" "nomirror"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_unknown_flag_dies() {
+  local out rc=0
+  out="$(bash "$PBX" ctx --nope 2>&1)" || rc=$?
+  assert_eq  "ctx: неизвестный флаг → die" "$rc" "1"
+  assert_has "ctx: сообщение о флаге"      "$out" "Неизвестный флаг"
+}
+
+test_cmd_ctx_in_help() {
+  local out
+  out="$(bash "$PBX" help 2>/dev/null)"
+  assert_has "help: pbx ctx упомянут" "$out" "pbx ctx"
+}
+
+test_cmd_ctx_json_valid_and_fields() {
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
+  assert_eq "ctx json: rc=0" "$rc" "0"
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1; then
+      ok "ctx json: валидный JSON"
+    else
+      bad "ctx json: НЕ валидный JSON: $out"
+    fi
+  fi
+  assert_has "ctx json: verdict danger"      "$out" '"verdict":"danger"'
+  assert_has "ctx json: behind_n=1"          "$out" '"behind_n":1'
+  assert_has "ctx json: причина в reasons"   "$out" '"code":"home_behind_corp"'
+  assert_has "ctx json: home-блок"           "$out" '"home":{'
+  assert_has "ctx json: corp-блок"           "$out" '"snapshot_at":'
+  assert_has "ctx json: compared_at"         "$out" '"compared_at":'
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_json_unknown_corp_null() {
+  _mk_ctx_fixture
+  local reg; reg="$(make_ws)"
+  # без MIRROR: в json-режиме не die, а unknown-запись с corp:null
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/proj.conf"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
+  assert_eq  "ctx json unknown: rc=0"          "$rc" "0"
+  assert_has "ctx json unknown: verdict"       "$out" '"verdict":"unknown"'
+  assert_has "ctx json unknown: corp:null"     "$out" '"corp":null'
+  assert_has "ctx json unknown: код no_mirror" "$out" '"code":"no_mirror"'
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json unknown: валиден" || bad "ctx json unknown: НЕ валиден: $out"
+  fi
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg"
+}
+
+test_cmd_ctx_json_nasty_subjects() {
+  # гадкое ИМЯ ветки (кавычка + кириллица) должно долететь до реального
+  # JSON-поля undelivered.name (branches.tsv → CTX_UNDELIVERED → ctx_json);
+  # в отличие от сабжекта коммита, undelivered.name реально сериализуется —
+  # уборка _json_str_v2 вокруг него ломает JSON и тест это ловит (см. проверку зубов).
+  _mk_ctx_fixture
+  ( cd "$CE_REPO" && git checkout -qb 'feature/за"дача-1' dev \
+    && echo nasty > nasty.txt && git add -A && git commit -qm 'nasty branch' \
+    && git push -q origin 'feature/за"дача-1' \
+    && git checkout -q dev ) >/dev/null 2>&1
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json: гадкое имя ветки не ломает JSON" \
+      || bad "ctx json: сломан гадким именем ветки: $out"
+  fi
+  assert_has "ctx json: undelivered.name — экранированное имя ветки" "$out" 'за\"дача'
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_json_corrupted_meta_numbers() {
+  # битые числа в .meta не должны ломать JSON (regex-guard → -1)
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"; mkdir -p "$ws/_dist"
+  printf 'PACKED_AT=CORRUPTED\nDIRTY_AT_PACK=xyz\nPUSHED_AT=NaN\nCOMMIT=abc\n' > "$ws/_dist/proj.meta"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json: битая мета не ломает JSON" \
+      || bad "ctx json: битая мета СЛОМАЛА JSON: $out"
+  fi
+  assert_has "ctx json: packed_at → -1 при мусоре" "$out" '"packed_at":-1'
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+# --- Э4: pbx self-update -------------------------------------------------------
+# Фикстура: bare-«зеркало pbx» с файлом pbx на ветке main + «установленная»
+# копия скрипта вне git. Глобали: SU_BASE, SU_MIRROR, SU_INSTALLED, SU_CONFDIR
+_mk_selfupdate_fixture() {
+  SU_BASE="$(mktemp -d)"
+  SU_MIRROR="$SU_BASE/pbx-mirror.git"
+  git init -q --bare "$SU_MIRROR"
+  local work="$SU_BASE/work"
+  git init -q -b main "$work"
+  ( cd "$work" && git config user.email t@t && git config user.name t \
+    && cp "$PBX" pbx && git add -A && git commit -qm 'pbx v1' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  SU_INSTALLED="$SU_BASE/bin/pbx"
+  mkdir -p "$SU_BASE/bin"
+  cp "$PBX" "$SU_INSTALLED"; chmod +x "$SU_INSTALLED"
+  SU_CONFDIR="$SU_BASE/conf"
+  mkdir -p "$SU_CONFDIR"
+  printf 'SELF_MIRROR=%s\n' "$SU_MIRROR" > "$SU_CONFDIR/self.conf"
+}
+
+# запуск установленной копии с подменёнными путями конфига
+_run_su() { XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" "$@"; }
+
+test_selfupdate_no_mirror_dies() {
+  _mk_selfupdate_fixture
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_BASE/empty-xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: без SELF_MIRROR → die" "$rc" "1"
+  assert_has "self-update: подсказка про self.conf" "$out" "SELF_MIRROR"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_first_install_and_rev() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: rc=0" "$rc" "0"
+  assert_has "self-update: сообщение об обновлении" "$out" "pbx"
+  local want; want="$(git -C "$SU_MIRROR" rev-parse main)"
+  assert_eq "self-update: SELF_SHA записан" \
+    "$(sed -n 's/^SELF_SHA=//p' "$SU_CONFDIR/xdg/pbx/self.rev")" "$want"
+  if [[ -f "$SU_INSTALLED.bak" ]]; then ok "self-update: бэкап создан"; else bad "self-update: нет бэкапа"; fi
+  if [[ -x "$SU_INSTALLED" ]]; then ok "self-update: файл исполняемый"; else bad "self-update: потерян +x"; fi
+  bash -n "$SU_INSTALLED" && ok "self-update: установленный валиден (bash -n)" || bad "self-update: битый скрипт"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_idempotent() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  ( _run_su self-update ) >/dev/null 2>&1
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: повтор rc=0"    "$rc" "0"
+  assert_has "self-update: «уже свежий»"   "$out" "свеж"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_check_changes_nothing() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(_run_su self-update --check 2>&1)" || rc=$?
+  assert_eq "self-update --check: rc=0" "$rc" "0"
+  assert_eq "self-update --check: файл не тронут" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  if [[ -f "$SU_CONFDIR/xdg/pbx/self.rev" ]]; then
+    bad "self-update --check: self.rev не должен появляться"
+  else
+    ok "self-update --check: self.rev не создан"
+  fi
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_broken_candidate_untouched() {
+  _mk_selfupdate_fixture
+  # кладём в зеркало битый скрипт
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf 'if then fi(\n' > pbx && git commit -qam 'broken' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq "self-update: битый кандидат → die" "$rc" "1"
+  assert_eq "self-update: установленный не тронут" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_rejects_no_main_dispatcher() {
+  # валидный bash, но НЕ pbx (нет main-диспетчера) — ловит именно grep-гейт
+  _mk_selfupdate_fixture
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf '#!/usr/bin/env bash\necho ok\n' > pbx && git commit -qam 'not-pbx' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: не-pbx кандидат → die"      "$rc" "1"
+  assert_has "self-update: причина — нет диспетчера"   "$out" "диспетчера"
+  assert_eq  "self-update: цель не тронута (no-main)" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_rejects_syntax_error_with_decoy_main() {
+  # синтаксически битый, но с decoy-строкой main() { — ловит именно bash -n гейт
+  _mk_selfupdate_fixture
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf 'main() {\nif then fi(\n' > pbx && git commit -qam 'decoy-main' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: decoy-main битый синтаксис → die" "$rc" "1"
+  assert_has "self-update: причина — bash -n"                "$out" "bash -n"
+  assert_eq  "self-update: цель не тронута (decoy)" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_git_workspace_refuses() {
+  _mk_selfupdate_fixture
+  local wt="$SU_BASE/worktree"
+  git init -q "$wt"
+  cp "$PBX" "$wt/pbx"; chmod +x "$wt/pbx"
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$wt/pbx" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: git-workspace → die"  "$rc" "1"
+  assert_has "self-update: подсказка git pull"   "$out" "git pull"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_preserves_mode() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  chmod 700 "$SU_INSTALLED"
+  ( XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update ) >/dev/null 2>&1
+  assert_eq "self-update: права 700 сохранены" \
+    "$(stat -c %a "$SU_INSTALLED")" "700"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_in_help() {
+  local out
+  out="$(bash "$PBX" help 2>/dev/null)"
+  assert_has "help: self-update упомянут" "$out" "self-update"
+}
+
+# --- Task 6: self-update hint при snapshot, self.rev в diag, пункты меню ---
+test_selfupdate_hint_in_snapshot() {
+  _mk_snap_fixture
+  local ws; ws="$(make_ws)"; WORKSPACE="$ws"
+  # «зеркало pbx» с более свежим SHA, чем в self.rev
+  local sm="$CE_BASE/selfmirror.git"
+  git init -q --bare "$sm"
+  local w="$CE_BASE/sw"
+  ( git init -q -b main "$w" && cd "$w" && git config user.email t@t \
+    && git config user.name t && cp "$PBX" pbx && git add -A \
+    && git commit -qm v2 && git push -q "$sm" main ) >/dev/null 2>&1
+  local xdg="$CE_BASE/xdg"; mkdir -p "$xdg/pbx"
+  printf 'SELF_MIRROR=%s\n' "$sm" > "$xdg/pbx/self.conf"
+  printf 'SELF_SHA=%s\n' "0000000000000000000000000000000000000000" > "$xdg/pbx/self.rev"
+  # плейн-режим: подсказки быть НЕ должно (TTY-only), snapshot работает как раньше
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq "hint: snapshot rc=0"                    "$rc" "0"
+  assert_no "hint: plain-вывод без подсказки (TTY-only)" "$out" "self-update"
+  # реальная точка вызова: cmd_snapshot (одиночный проект) под форсированным UI_COLOR_OUT
+  local hint
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
+  assert_has "hint: при расхождении SHA есть подсказка (через cmd_snapshot)" "$hint" "self-update"
+  # совпадение SHA → подсказки нет
+  printf 'SELF_SHA=%s\n' "$(git -C "$sm" rev-parse main)" > "$xdg/pbx/self.rev"
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
+  assert_no "hint: SHA совпал — подсказки нет (через cmd_snapshot)" "$hint" "self-update"
+  # сбой ls-remote (битый URL) → молча, cmd_snapshot всё равно rc=0
+  printf 'SELF_MIRROR=%s\n' "$CE_BASE/nope.git" > "$xdg/pbx/self.conf"
+  local hrc=0
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
+    'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)" || hrc=$?
+  assert_eq "hint: сбой сети — rc=0 (через cmd_snapshot)"   "$hrc" "0"
+  assert_no "hint: сбой сети — молчит (через cmd_snapshot)" "$hint" "self-update"
+  rm -rf "$CE_BASE" "$SN_REG" "$ws"
+}
+
+test_diag_selfrev_line() {
+  _mk_selfupdate_fixture
+  local xdg="$SU_BASE/xdg"; mkdir -p "$xdg/pbx"
+  printf 'SELF_SHA=%s\nUPDATED_AT=1751500000\n' "abc1234abc1234abc1234abc1234abc1234abc12" > "$xdg/pbx/self.rev"
+  local out
+  out="$(XDG_CONFIG_HOME="$xdg" bash -c 'source "'"$PBX"'"; collect_diag' 2>/dev/null)"
+  assert_has "diag: строка self.rev" "$out" "self.rev"
+  # без self.rev строка отсутствует (plain-инвариант прежних машин)
+  out="$(XDG_CONFIG_HOME="$SU_BASE/empty" bash -c 'source "'"$PBX"'"; collect_diag' 2>/dev/null)"
+  assert_no "diag: без self.rev строки нет" "$out" "self.rev"
+  rm -rf "$SU_BASE"
+}
+
+test_menu_has_ctx_and_selfupdate() {
+  # меню: пункт 5 — ctx (после corp), пункт 11 — self-update; выход — последний
+  local out
+  out="$(printf '14\n' | bash -c 'source "'"$PBX"'"; UI_TTY=1 TERM=xterm cmd_menu' 2>&1 || true)"
+  assert_has "меню: пункт ctx"         "$out" "ctx"
+  assert_has "меню: пункт self-update" "$out" "self-update"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -1941,9 +2481,9 @@ test_menu_snapshot_runs_and_exits() {
 }
 
 test_menu_corp_returns_to_menu() {
-  # 5 = corp (read-only) → Enter (menu_pause) → 12 = выход
+  # 5 = corp (read-only) → Enter (menu_pause) → 14 = выход
   local ws reg out; ws="$(make_ws)"; reg="$(make_ws)"
-  out="$( ( printf '5\n\n12\n' | {
+  out="$( ( printf '5\n\n14\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -2096,6 +2636,41 @@ test_die_writes_diag
 test_add_creates_entry
 test_add_refuses_overwrite
 test_valid_project_registry_elsewhere
+test_ctx_compare_unknown_cases
+test_ctx_compare_behind_danger
+test_ctx_compare_ok_when_home_has_tip
+test_ctx_compare_unrelated_histories
+test_ctx_compare_no_base_warn
+test_ctx_compare_snapshot_stale_and_no_vpn
+test_ctx_compare_repo_dirty_and_merge
+test_ctx_compare_push_and_pack_stale
+test_ctx_compare_push_fresh_silent
+test_ctx_compare_undelivered_info
+test_ctx_compare_danger_beats_warn
+test_cmd_ctx_renders_verdict
+test_cmd_ctx_render_glyphs
+test_cmd_ctx_no_mirror_dies_plain
+test_cmd_ctx_all_skips_no_mirror
+test_cmd_ctx_unknown_flag_dies
+test_cmd_ctx_in_help
+test_cmd_ctx_json_valid_and_fields
+test_cmd_ctx_json_unknown_corp_null
+test_cmd_ctx_json_nasty_subjects
+test_cmd_ctx_json_corrupted_meta_numbers
+
+test_selfupdate_no_mirror_dies
+test_selfupdate_first_install_and_rev
+test_selfupdate_idempotent
+test_selfupdate_check_changes_nothing
+test_selfupdate_broken_candidate_untouched
+test_selfupdate_rejects_no_main_dispatcher
+test_selfupdate_rejects_syntax_error_with_decoy_main
+test_selfupdate_git_workspace_refuses
+test_selfupdate_preserves_mode
+test_selfupdate_in_help
+test_selfupdate_hint_in_snapshot
+test_diag_selfrev_line
+test_menu_has_ctx_and_selfupdate
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

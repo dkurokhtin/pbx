@@ -66,15 +66,18 @@ dev sha/date/subj, log.tsv 20 коммитов, branches.tsv, dirty/in_merge REP
 | `snapshot_no_vpn` | warn | снимок сделан с `fetch_ok=false` — корп-данные в нём несвежие |
 | `repo_dirty` | warn | REPO ноута грязный (dirty>0) — доставка встанет |
 | `repo_in_merge` | warn | REPO ноута в незавершённом merge |
-| `push_stale` | warn | есть push-мета и `PUSH_COMMIT` ≠ текущий HEAD SRC — снапшот в зеркале отстаёт от дома |
+| `push_stale` | warn | есть push-мета и `PUSH_SOURCE_COMMIT` (HEAD SRC на момент push) ≠ текущий HEAD SRC — снапшот в зеркале отстаёт от дома (уточнение реализации: сравнение по PUSH_COMMIT срабатывало бы всегда — это коммит зеркала, не SRC) |
 | `pack_stale` | warn | есть архив и он протух (реюз семантики `stale` Э1) |
 | `undelivered_branches` | info | в корп есть ветки ahead>0 — показать списком, на вердикт не влияет |
 
-Механика `home_behind_corp`: `git -C SRC cat-file -e <sha>^{commit}` для
-tip корп-dev; не найден → перебор 20 сокращённых SHA (`%h`) корп-лога
-сверху вниз, первый найденный индекс = N. Неоднозначный короткий SHA
-(cat-file ошибка) трактуется как «не найден» — строгая сторона. Ни одного
-из 20 → `histories_unrelated`.
+Механика `home_behind_corp`: `git -C SRC merge-base --is-ancestor <sha>
+HEAD` для tip корп-dev (уточнение реализации: `cat-file -e` даёт
+false-positive — объект есть в odb через persistent remote-tracking ref,
+хотя из HEAD недостижим; подтверждено исполнением на фикстуре); не предок →
+перебор 20 сокращённых SHA (`%h`) корп-лога сверху вниз тем же способом,
+первый найденный индекс = N. Неоднозначный короткий SHA (ошибка git)
+трактуется как «не найден» — строгая сторона. Ни одного из 20 →
+`histories_unrelated`.
 
 ### 3.3 Вывод
 
@@ -109,6 +112,9 @@ status/corp Э1–Э3 НЕ меняются — у ctx собственная с
   как все конфиги; дома SSH-URL, на ноуте HTTPS — поэтому дефолт в код не
   зашит); env-override `PBX_SELF_MIRROR`. Нет self.conf и env → die с
   подсказкой-однострочником для создания.
+- **Ветка зеркала**: `SELF_BRANCH=` в self.conf (env-override
+  `PBX_SELF_BRANCH`), дефолт `main` — согласованно используется self-update
+  и тихой проверкой. Алиас команды: `selfupdate`.
 - **Версия установленного**: SHA в `~/.config/pbx/self.rev`, запись через
   существующий `meta_update` (атомарно, best-effort: провал записи → warn,
   следующий запуск честно перепроверит).

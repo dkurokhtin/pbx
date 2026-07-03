@@ -447,10 +447,10 @@ test_cmd_ctx_renders_verdict() {
   local ws; ws="$(make_ws)"
   local out rc=0
   # снимок в зеркало (на «ноуте»), затем ctx (на «дому»)
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
   assert_eq "ctx-фикстура: snapshot rc=0" "$rc" "0"
   rc=0
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
   assert_eq  "ctx: rc=0"                    "$rc" "0"
   assert_has "ctx: вердикт danger в выводе" "$out" "danger"
   assert_has "ctx: причина отставания"      "$out" "отстал"
@@ -475,9 +475,9 @@ test_cmd_ctx_all_skips_no_mirror() {
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   printf 'SRC=%s\n' "$CTX_SRC" > "$reg/nomirror.conf"
   local ws; ws="$(make_ws)"
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
   local out rc=0
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
   assert_eq  "ctx all: rc=0"                     "$rc" "0"
   assert_has "ctx all: проект с MIRROR обработан" "$out" "proj"
   assert_no  "ctx all: без MIRROR не в обходе"    "$out" "nomirror"
@@ -655,9 +655,9 @@ test_cmd_ctx_json_valid_and_fields() {
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   local ws; ws="$(make_ws)"
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
   local out rc=0
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)" || rc=$?
   assert_eq "ctx json: rc=0" "$rc" "0"
   if command -v python3 >/dev/null 2>&1; then
     if printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1; then
@@ -701,9 +701,9 @@ test_cmd_ctx_json_nasty_subjects() {
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
   local ws; ws="$(make_ws)"
-  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
   local out
-  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
   if command -v python3 >/dev/null 2>&1; then
     printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
       && ok "ctx json: гадкие сабжекты не ломают JSON" \
@@ -1123,7 +1123,7 @@ test_selfupdate_hint_in_snapshot() {
   printf 'SELF_SHA=%s\n' "0000000000000000000000000000000000000000" > "$xdg/pbx/self.rev"
   # плейн-режим: подсказки быть НЕ должно (TTY-only), snapshot работает как раньше
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
   assert_eq "hint: snapshot rc=0"                    "$rc" "0"
   assert_no "hint: plain-вывод без подсказки (TTY-only)" "$out" "self-update"
   # сам хелпер: под форсированным UI_COLOR_OUT печатает подсказку
