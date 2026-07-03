@@ -1701,6 +1701,122 @@ test_cmd_ctx_json_corrupted_meta_numbers() {
   rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
 }
 
+# --- Э4: pbx self-update -------------------------------------------------------
+# Фикстура: bare-«зеркало pbx» с файлом pbx на ветке main + «установленная»
+# копия скрипта вне git. Глобали: SU_BASE, SU_MIRROR, SU_INSTALLED, SU_CONFDIR
+_mk_selfupdate_fixture() {
+  SU_BASE="$(mktemp -d)"
+  SU_MIRROR="$SU_BASE/pbx-mirror.git"
+  git init -q --bare "$SU_MIRROR"
+  local work="$SU_BASE/work"
+  git init -q -b main "$work"
+  ( cd "$work" && git config user.email t@t && git config user.name t \
+    && cp "$PBX" pbx && git add -A && git commit -qm 'pbx v1' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  SU_INSTALLED="$SU_BASE/bin/pbx"
+  mkdir -p "$SU_BASE/bin"
+  cp "$PBX" "$SU_INSTALLED"; chmod +x "$SU_INSTALLED"
+  SU_CONFDIR="$SU_BASE/conf"
+  mkdir -p "$SU_CONFDIR"
+  printf 'SELF_MIRROR=%s\n' "$SU_MIRROR" > "$SU_CONFDIR/self.conf"
+}
+
+# запуск установленной копии с подменёнными путями конфига
+_run_su() { XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' bash "$SU_INSTALLED" "$@"; }
+
+test_selfupdate_no_mirror_dies() {
+  _mk_selfupdate_fixture
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_BASE/empty-xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: без SELF_MIRROR → die" "$rc" "1"
+  assert_has "self-update: подсказка про self.conf" "$out" "SELF_MIRROR"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_first_install_and_rev() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: rc=0" "$rc" "0"
+  assert_has "self-update: сообщение об обновлении" "$out" "pbx"
+  local want; want="$(git -C "$SU_MIRROR" rev-parse main)"
+  assert_eq "self-update: SELF_SHA записан" \
+    "$(sed -n 's/^SELF_SHA=//p' "$SU_CONFDIR/xdg/pbx/self.rev")" "$want"
+  if [[ -f "$SU_INSTALLED.bak" ]]; then ok "self-update: бэкап создан"; else bad "self-update: нет бэкапа"; fi
+  if [[ -x "$SU_INSTALLED" ]]; then ok "self-update: файл исполняемый"; else bad "self-update: потерян +x"; fi
+  bash -n "$SU_INSTALLED" && ok "self-update: установленный валиден (bash -n)" || bad "self-update: битый скрипт"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_idempotent() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  ( _run_su self-update ) >/dev/null 2>&1
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: повтор rc=0"    "$rc" "0"
+  assert_has "self-update: «уже свежий»"   "$out" "свеж"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_check_changes_nothing() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(_run_su self-update --check 2>&1)" || rc=$?
+  assert_eq "self-update --check: rc=0" "$rc" "0"
+  assert_eq "self-update --check: файл не тронут" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  if [[ -f "$SU_CONFDIR/xdg/pbx/self.rev" ]]; then
+    bad "self-update --check: self.rev не должен появляться"
+  else
+    ok "self-update --check: self.rev не создан"
+  fi
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_broken_candidate_untouched() {
+  _mk_selfupdate_fixture
+  # кладём в зеркало битый скрипт
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf 'if then fi(\n' > pbx && git commit -qam 'broken' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(_run_su self-update 2>&1)" || rc=$?
+  assert_eq "self-update: битый кандидат → die" "$rc" "1"
+  assert_eq "self-update: установленный не тронут" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_git_workspace_refuses() {
+  _mk_selfupdate_fixture
+  local wt="$SU_BASE/worktree"
+  git init -q "$wt"
+  cp "$PBX" "$wt/pbx"; chmod +x "$wt/pbx"
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$wt/pbx" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: git-workspace → die"  "$rc" "1"
+  assert_has "self-update: подсказка git pull"   "$out" "git pull"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_in_help() {
+  local out
+  out="$(bash "$PBX" help 2>/dev/null)"
+  assert_has "help: self-update упомянут" "$out" "self-update"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2436,6 +2552,14 @@ test_cmd_ctx_json_valid_and_fields
 test_cmd_ctx_json_unknown_corp_null
 test_cmd_ctx_json_nasty_subjects
 test_cmd_ctx_json_corrupted_meta_numbers
+
+test_selfupdate_no_mirror_dies
+test_selfupdate_first_install_and_rev
+test_selfupdate_idempotent
+test_selfupdate_check_changes_nothing
+test_selfupdate_broken_candidate_untouched
+test_selfupdate_git_workspace_refuses
+test_selfupdate_in_help
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

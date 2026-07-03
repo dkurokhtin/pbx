@@ -1945,6 +1945,124 @@ cmd_scan() {
   return 0
 }
 
+# =============================================================================
+#  self-update (Э4): обновление pbx из личного GitHub-зеркала инструмента.
+#  Источник: SELF_MIRROR в $SELF_CONF (env PBX_SELF_MIRROR побеждает).
+#  Версия установленного: SELF_SHA в $SELF_REV_FILE (meta_update-формат).
+# =============================================================================
+SELF_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pbx/self.conf"
+SELF_REV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/pbx/self.rev"
+
+# URL зеркала pbx: env → self.conf; пусто, если не настроен.
+self_mirror_url() {
+  if [[ -n "${PBX_SELF_MIRROR:-}" ]]; then
+    strip_cr "$PBX_SELF_MIRROR"; return 0
+  fi
+  [[ -f "$SELF_CONF" ]] || return 0
+  strip_cr "$(sed -n 's/^SELF_MIRROR=//p' "$SELF_CONF" | head -1)"
+  return 0
+}
+
+# Ветка зеркала pbx: env → self.conf → main.
+self_branch_name() {
+  if [[ -n "${PBX_SELF_BRANCH:-}" ]]; then
+    strip_cr "$PBX_SELF_BRANCH"; return 0
+  fi
+  local b=''
+  [[ -f "$SELF_CONF" ]] && b="$(sed -n 's/^SELF_BRANCH=//p' "$SELF_CONF" | head -1)"
+  strip_cr "${b:-main}"
+  return 0
+}
+
+cmd_self_update() {
+  local check=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --check) check=1 ;;
+      *) die "Неизвестный аргумент: $a (ожидается --check)" ;;
+    esac
+  done
+
+  local mirror branch
+  mirror="$(self_mirror_url)"
+  branch="$(self_branch_name)"
+  [[ -n "$mirror" ]] || die "Не задан SELF_MIRROR. Создай $SELF_CONF со строкой SELF_MIRROR=https://github.com/<user>/pbx.git (или env PBX_SELF_MIRROR)"
+
+  # установленный скрипт (резолв симлинка /usr/local/bin/pbx)
+  local self real
+  self="${BASH_SOURCE[0]}"
+  real="$(readlink -f "$self" 2>/dev/null || echo "$self")"
+  # fail-closed: скрипт в git-worktree (дом, рабочая копия) не трогаем
+  if [[ "$(git -C "$(dirname "$real")" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]]; then
+    die "Это рабочая копия в git ($real) — обновляйся здесь через git pull, не self-update"
+  fi
+
+  ui_section "Self-update" "🔵 pbx self-update"
+  ui_kv MIRROR "$mirror"
+  ui_kv BRANCH "$branch"
+
+  local tmp; tmp="$(mktemp -d -t pbx-selfupd.XXXXXX)" || die "mktemp не удался"
+  if ! git init -q "$tmp" 2>/dev/null \
+     || ! GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$tmp" fetch -q --depth 1 "$mirror" "$branch" 2>/dev/null; then
+    rm -rf "$tmp"
+    die "Зеркало pbx недоступно: $mirror ($branch) — VPN/PAT/URL?"
+  fi
+  local sha
+  sha="$(git -C "$tmp" rev-parse FETCH_HEAD 2>/dev/null || true)"
+  _pbx_is_sha "$sha" || { rm -rf "$tmp"; die "Не удалось получить SHA из зеркала"; }
+
+  local cur=''
+  [[ -f "$SELF_REV_FILE" ]] && cur="$(strip_cr "$(sed -n 's/^SELF_SHA=//p' "$SELF_REV_FILE" | head -1)")"
+
+  if (( check )); then
+    c_blue "🔵 установлено: ${cur:-неизвестно}; в зеркале: $sha"
+    if [[ "$sha" == "$cur" ]]; then
+      c_green "✅ pbx свежий"
+    else
+      c_warn "⚠️  доступно обновление: pbx self-update"
+    fi
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  if [[ "$sha" == "$cur" ]]; then
+    c_green "✅ pbx уже свежий (${sha:0:7})"
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  # кандидат: файл pbx из дерева FETCH_HEAD + валидация (fail-closed)
+  if ! git -C "$tmp" cat-file blob "FETCH_HEAD:pbx" > "$tmp/pbx.new" 2>/dev/null; then
+    rm -rf "$tmp"; die "В зеркале нет файла pbx (ветка $branch)"
+  fi
+  if ! bash -n "$tmp/pbx.new" 2>/dev/null; then
+    rm -rf "$tmp"; die "Кандидат не проходит bash -n — обновление отменено, скрипт не тронут"
+  fi
+  if ! grep -q '^main() {' "$tmp/pbx.new"; then
+    rm -rf "$tmp"; die "Кандидат не похож на pbx (нет диспетчера main) — отменено"
+  fi
+
+  cp -- "$real" "$real.bak" 2>/dev/null || { rm -rf "$tmp"; die "Не удалось сделать бэкап $real.bak"; }
+  # атомарная замена: staged-файл РЯДОМ (та же ФС) + mv (inode swap —
+  # безопасно для исполняющегося bash-скрипта)
+  local staged="$real.new.$$"
+  if ! { cp -- "$tmp/pbx.new" "$staged" && chmod +x "$staged" && mv -f -- "$staged" "$real"; } 2>/dev/null; then
+    rm -f -- "$staged" 2>/dev/null
+    rm -rf "$tmp"
+    die "Замена $real не удалась (бэкап цел: $real.bak)"
+  fi
+  rm -rf "$tmp"
+  mkdir -p "$(dirname "$SELF_REV_FILE")" 2>/dev/null || true
+  meta_update "$SELF_REV_FILE" "SELF_SHA=$sha" "UPDATED_AT=$(date +%s)"
+  if [[ -n "$cur" ]]; then
+    c_green "✅ pbx обновлён: ${cur:0:7} → ${sha:0:7} (бэкап: $real.bak)"
+  else
+    c_green "✅ pbx установлен: ${sha:0:7} (бэкап: $real.bak)"
+  fi
+  return 0
+}
+
 # ---- help ------------------------------------------------------------------
 cmd_help() {
   if (( ! UI_COLOR_OUT )); then
@@ -1964,6 +2082,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx status  [проект] [--json]                 сводка: ветка, dirty, дрейф от последнего pack, свежесть архива
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
+  pbx self-update [--check]                     обновить pbx из зеркала инструмента (SELF_MIRROR в ~/.config/pbx/self.conf); --check — только проверить
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
   pbx help                                      эта справка
 
@@ -2012,6 +2131,7 @@ ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
   ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
   ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
+  ${C_CYAN}pbx self-update${C_RESET} [--check]          ${C_DIM}обновить pbx из зеркала (ноут); --check — только проверить${C_RESET}
   ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
   ${C_CYAN}pbx${C_RESET}                                 ${C_DIM}интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)${C_RESET}
 
@@ -2329,6 +2449,7 @@ main() {
     snapshot)           cmd_snapshot "$@" ;;
     corp)               cmd_corp "$@" ;;
     ctx)                cmd_ctx "$@" ;;
+    self-update|selfupdate) cmd_self_update "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;
