@@ -1465,6 +1465,72 @@ test_ctx_compare_no_base_warn() {
   rm -rf "$CE_BASE" "$CTX_STATE"
 }
 
+test_ctx_compare_snapshot_stale_and_no_vpn() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  sed -i "s/^GENERATED_AT=.*/GENERATED_AT=$(( $(date +%s) - 90000 ))/" "$CTX_STATE/state.env"
+  sed -i 's/^FETCH_OK=.*/FETCH_OK=false/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: снимок >24ч → snapshot_stale" "$CTX_REASONS" "snapshot_stale"
+  assert_has "ctx: fetch_ok=false → snapshot_no_vpn" "$CTX_REASONS" "snapshot_no_vpn"
+  assert_eq  "ctx: два warn → вердикт warn" "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_repo_dirty_and_merge() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  sed -i 's/^DIRTY=.*/DIRTY=3/'        "$CTX_STATE/state.env"
+  sed -i 's/^IN_MERGE=.*/IN_MERGE=true/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: REPO dirty → repo_dirty"      "$CTX_REASONS" "repo_dirty"
+  assert_has "ctx: REPO in merge → repo_in_merge" "$CTX_REASONS" "repo_in_merge"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_push_and_pack_stale() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ST_PUSH_SOURCE="0000000000000000000000000000000000000000"   # != HEAD SRC
+  ST_ARCHIVE_EXISTS=true; ST_STALE=true
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: push отстаёт → push_stale" "$CTX_REASONS" "push_stale"
+  assert_has "ctx: архив протух → pack_stale" "$CTX_REASONS" "pack_stale"
+  assert_eq  "ctx: warn-вердикт"              "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_push_fresh_silent() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ST_PUSH_SOURCE="$(git -C "$CTX_SRC" rev-parse HEAD)"
+  ctx_compare "$CTX_STATE" 0
+  assert_no "ctx: push свежий — молчит" "$CTX_REASONS" "push_stale"
+  assert_eq "ctx: ok"                   "$CTX_VERDICT" "ok"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_undelivered_info() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ctx_compare "$CTX_STATE" 0
+  # фикстура: feature/AAA-1 имеет ahead=1 над dev
+  assert_has "ctx: недоставленная ветка в списке" "$CTX_UNDELIVERED" "feature/AAA-1"
+  assert_has "ctx: info-причина undelivered_branches" "$CTX_REASONS" "undelivered_branches"
+  assert_eq  "ctx: info не поднимает вердикт" "$CTX_VERDICT" "ok"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_danger_beats_warn() {
+  _mk_ctx_fixture; _ctx_st_defaults    # дом отстал (danger)
+  sed -i 's/^FETCH_OK=.*/FETCH_OK=false/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_eq "ctx: danger побеждает warn" "$CTX_VERDICT" "danger"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2184,6 +2250,12 @@ test_ctx_compare_behind_danger
 test_ctx_compare_ok_when_home_has_tip
 test_ctx_compare_unrelated_histories
 test_ctx_compare_no_base_warn
+test_ctx_compare_snapshot_stale_and_no_vpn
+test_ctx_compare_repo_dirty_and_merge
+test_ctx_compare_push_and_pack_stale
+test_ctx_compare_push_fresh_silent
+test_ctx_compare_undelivered_info
+test_ctx_compare_danger_beats_warn
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

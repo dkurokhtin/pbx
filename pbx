@@ -1403,6 +1403,46 @@ ctx_compare() {
     _ctx_reason no_base warn 'в снимке нет базовой ветки — сравнение недоступно'
   fi
 
+  # --- свежесть снимка --------------------------------------------------------
+  local now; now="$(date +%s)"
+  if [[ "$CTX_SNAPSHOT_AT" != -1 ]] && (( now - CTX_SNAPSHOT_AT > PBX_CTX_STALE_SEC )); then
+    _ctx_reason snapshot_stale warn \
+      "снимок протух (>24 ч) — обнови на ноуте: pbx snapshot"
+  fi
+  if [[ -n "$CTX_FETCH_OK" && "$CTX_FETCH_OK" != true ]]; then
+    _ctx_reason snapshot_no_vpn warn \
+      'снимок делался без связи с gitlab (fetch_ok=false) — корп-данные могут отставать'
+  fi
+
+  # --- состояние REPO на ноуте -------------------------------------------------
+  if [[ "$CTX_REPO_DIRTY" != -1 ]] && (( CTX_REPO_DIRTY > 0 )); then
+    _ctx_reason repo_dirty warn "корп-репо на ноуте грязный ($CTX_REPO_DIRTY правок) — доставка встанет"
+  fi
+  if [[ "$CTX_IN_MERGE" == true ]]; then
+    _ctx_reason repo_in_merge warn 'корп-репо в незавершённом merge — доставка встанет'
+  fi
+
+  # --- гигиена транспорта дома --------------------------------------------------
+  if [[ -n "$ST_PUSH_COMMIT" && -n "$ST_PUSH_SOURCE" ]]; then
+    local head_now
+    head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]]; then
+      _ctx_reason push_stale warn \
+        'push-снапшот в зеркале отстаёт от SRC — сделай pbx push перед доставкой'
+    fi
+  fi
+  if [[ "$ST_ARCHIVE_EXISTS" == true && "$ST_STALE" == true ]]; then
+    _ctx_reason pack_stale warn 'архив протух — сделай pbx pack перед доставкой'
+  fi
+
+  # --- информация (вердикт не меняет) -------------------------------------------
+  if [[ -n "$CTX_UNDELIVERED" ]]; then
+    local u_cnt
+    u_cnt="$(printf '%s' "$CTX_UNDELIVERED" | grep -c . || true)"
+    _ctx_reason undelivered_branches info \
+      "в корп есть недоставленное/невлитое: $u_cnt ветк(и) с ahead>0"
+  fi
+
   return 0
 }
 
