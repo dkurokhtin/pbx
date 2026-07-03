@@ -1446,6 +1446,98 @@ ctx_compare() {
   return 0
 }
 
+# ctx_render_project <проект> — человекочитаемая секция вердикта (по CTX_*/ST_*).
+ctx_render_project() {
+  local p="$1"
+  local mark
+  case "$CTX_VERDICT" in
+    ok)      mark='🟢' ;;
+    warn)    mark='🟡' ;;
+    danger)  mark='🔴' ;;
+    *)       mark='⚪' ;;
+  esac
+  printf '%s %s — %s\n' "$mark" "$p" "$CTX_VERDICT"
+  local code level msg
+  while IFS=$'\t' read -r code level msg || [[ -n "$code" ]]; do
+    [[ -n "$code" ]] || continue
+    case "$level" in
+      danger) c_red  "    ✗ $msg" ;;
+      warn)   c_warn "    ! $msg" ;;
+      *)      printf '    · %s\n' "$msg" ;;
+    esac
+  done <<< "$CTX_REASONS"
+  local uname uahead
+  if [[ -n "$CTX_UNDELIVERED" ]]; then
+    while IFS=$'\t' read -r uname uahead || [[ -n "$uname" ]]; do
+      [[ -n "$uname" ]] || continue
+      printf '      %s ahead=%s\n' "$(pad "$uname" 34)" "$uahead"
+    done <<< "$CTX_UNDELIVERED"
+  fi
+  return 0
+}
+
+# ctx_json — реализация в Task 4 (Э4); заглушка честно умирает.
+ctx_json() { die "ctx --json ещё не реализован"; }
+
+# cmd_ctx [проект] [--json] — вердикт готовности к доставке (дом).
+cmd_ctx() {
+  local project='' json=0 a
+  for a in "$@"; do
+    a="$(strip_cr "$a")"
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "Неизвестный флаг: $a (ожидается --json)" ;;
+      *) [[ -n "$project" ]] && die "Лишний аргумент: $a (проект указывается один)"; project="$a" ;;
+    esac
+  done
+  if [[ -n "$project" ]]; then
+    PBX_CURRENT_PROJECT="$project"
+    valid_project "$project"
+    if (( ! json )); then
+      load_config "$project"
+      [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project'. Добавь MIRROR=git@github.com:<user>/<repo>.git в $PBX_REGISTRY_DIR/$project.conf"
+    fi
+  fi
+
+  local -a names=()
+  if [[ -n "$project" ]]; then
+    names=("$project")
+  else
+    local p
+    while IFS= read -r p; do
+      load_config "$p"
+      [[ -n "${MIRROR:-}" ]] && names+=("$p")
+    done < <(list_projects)
+  fi
+
+  if (( json )); then
+    ctx_json ${names[@]+"${names[@]}"}
+    return 0
+  fi
+
+  ui_section "Вердикт дом↔корп" "🔵 Вердикт дом↔корп:"
+  if (( ${#names[@]} == 0 )); then
+    c_warn "  (проектов с MIRROR не найдено — задай MIRROR= в реестре)"
+    return 0
+  fi
+  local pr d rc
+  for pr in "${names[@]}"; do
+    load_config "$pr"
+    status_collect "$pr"
+    d="$(mktemp -d -t pbx-ctx.XXXXXX)"
+    rc=0
+    if [[ -z "${MIRROR:-}" ]]; then
+      rc=4
+    else
+      corp_read_state "$MIRROR" "$d" || rc=$?
+    fi
+    ctx_compare "$d" "$rc"
+    ctx_render_project "$pr"
+    rm -rf "$d"
+  done
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
@@ -1799,6 +1891,7 @@ pbx — доставка проектов Pybotx (WSL)
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
   pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
+  pbx ctx     [проект] [--json]                 ДОМ: вердикт готовности к доставке (сравнение дом↔корп по снимку); --json — для ИИ
   pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
@@ -1847,6 +1940,7 @@ ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
   ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → ветка pbx/state зеркала${C_RESET}
   ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
+  ${C_CYAN}pbx ctx${C_RESET}     [проект] [--json]       ${C_DIM}дом: вердикт готовности к доставке (ok/warn/danger)${C_RESET}
   ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
@@ -2170,6 +2264,7 @@ main() {
     push)               require_wsl; cmd_push "$@" ;;
     snapshot)           cmd_snapshot "$@" ;;
     corp)               cmd_corp "$@" ;;
+    ctx)                cmd_ctx "$@" ;;
     deliver|update)     require_wsl; cmd_deliver "$@" ;;
     add)                require_wsl; cmd_add "$@" ;;
     scan)               require_wsl; cmd_scan "$@" ;;

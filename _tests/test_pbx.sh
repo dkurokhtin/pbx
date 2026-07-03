@@ -1531,6 +1531,65 @@ test_ctx_compare_danger_beats_warn() {
   rm -rf "$CE_BASE" "$CTX_STATE"
 }
 
+test_cmd_ctx_renders_verdict() {
+  _mk_ctx_fixture
+  # зеркало со снимком: реюз snap-фикстуры вручную
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  local out rc=0
+  # снимок в зеркало (на «ноуте»), затем ctx (на «дому»)
+  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  assert_eq "ctx-фикстура: snapshot rc=0" "$rc" "0"
+  rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  assert_eq  "ctx: rc=0"                    "$rc" "0"
+  assert_has "ctx: вердикт danger в выводе" "$out" "danger"
+  assert_has "ctx: причина отставания"      "$out" "отстал"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_no_mirror_dies_plain() {
+  _mk_ctx_fixture
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/proj.conf"
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" bash "$PBX" ctx proj 2>&1)" || rc=$?
+  assert_eq  "ctx: явный проект без MIRROR → die" "$rc" "1"
+  assert_has "ctx: подсказка про MIRROR"          "$out" "MIRROR"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg"
+}
+
+test_cmd_ctx_all_skips_no_mirror() {
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  printf 'SRC=%s\n' "$CTX_SRC" > "$reg/nomirror.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx 2>&1)" || rc=$?
+  assert_eq  "ctx all: rc=0"                     "$rc" "0"
+  assert_has "ctx all: проект с MIRROR обработан" "$out" "proj"
+  assert_no  "ctx all: без MIRROR не в обходе"    "$out" "nomirror"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_unknown_flag_dies() {
+  local out rc=0
+  out="$(bash "$PBX" ctx --nope 2>&1)" || rc=$?
+  assert_eq  "ctx: неизвестный флаг → die" "$rc" "1"
+  assert_has "ctx: сообщение о флаге"      "$out" "Неизвестный флаг"
+}
+
+test_cmd_ctx_in_help() {
+  local out
+  out="$(bash "$PBX" help 2>/dev/null)"
+  assert_has "help: pbx ctx упомянут" "$out" "pbx ctx"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2256,6 +2315,11 @@ test_ctx_compare_push_and_pack_stale
 test_ctx_compare_push_fresh_silent
 test_ctx_compare_undelivered_info
 test_ctx_compare_danger_beats_warn
+test_cmd_ctx_renders_verdict
+test_cmd_ctx_no_mirror_dies_plain
+test_cmd_ctx_all_skips_no_mirror
+test_cmd_ctx_unknown_flag_dies
+test_cmd_ctx_in_help
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }
