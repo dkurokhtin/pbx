@@ -61,7 +61,7 @@ flowchart LR
     pbx corp    [имя] [--json]                        ДОМ: показать снимок корп-состояния из зеркала
     pbx ctx     [проект] [--json]                     ДОМ: вердикт готовности к доставке — сравнение дом↔корп по снимку (ok/warn/danger/unknown, страховка SUP-2603)
     pbx log     [имя]                                 диагностика для ИИ-агента (stdout + лог-файл)
-    pbx self-update [--check]                         НОУТ: обновить pbx из личного зеркала инструмента (SELF_MIRROR в ~/.config/pbx/self.conf); --check — только проверить
+    pbx self-update [--check]                         НОУТ: обновить pbx из личного зеркала инструмента (SELF_MIRROR в ~/.config/pbx/self.conf; ветка зеркала: SELF_BRANCH=/PBX_SELF_BRANCH, дефолт main); --check — только проверить
     pbx help
 
 ## Интерактивное меню

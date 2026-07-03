@@ -2125,6 +2125,8 @@ pbx — доставка проектов Pybotx (WSL)
   PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
   PBX_TARGET_BRANCH (=dev)     PBX_FORGE (=gitlab)
   PBX_ASSUME_YES (=0)          пропустить подтверждение deliver-guard (как --yes)
+  PBX_SELF_MIRROR              зеркало pbx для self-update (иначе SELF_MIRROR= из ~/.config/pbx/self.conf)
+  PBX_SELF_BRANCH (=main)      ветка зеркала pbx
 
 Пер-проектный конфиг ($WORKSPACE/<проект>/.pbx.conf, необязателен):
   BASE_BRANCH=dev            от какой ветки ответвляемся
@@ -2168,6 +2170,7 @@ ${C_BOLD}Примеры${C_RESET}
 
 ${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
             ${C_DIM}PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES PBX_NO_MENU${C_RESET}
+            ${C_DIM}PBX_SELF_MIRROR PBX_SELF_BRANCH${C_RESET}
 
 ${C_DIM}Конфиги и реестр: подробности в plain-справке (pbx help | cat) и README.${C_RESET}
 EOF

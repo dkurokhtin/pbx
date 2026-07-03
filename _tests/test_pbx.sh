@@ -1388,12 +1388,10 @@ test_forge_github() {
 _mk_ctx_fixture() {
   _mk_corp_fixture
   CTX_SRC="$CE_BASE/src"
-  # Дом = клон origin, затем отмотка на 1 коммит назад + очистка рефлога
+  # Дом = клон origin, затем отмотка на 1 коммит назад
   ( git clone -q "$CE_ORIGIN" "$CTX_SRC" 2>/dev/null \
     && cd "$CTX_SRC" && git config user.email t@t && git config user.name t \
-    && git checkout -q dev && git reset -q --hard HEAD~1 \
-    && git reflog expire --expire=now --all 2>/dev/null \
-    && git gc -q 2>/dev/null ) >/dev/null 2>&1
+    && git checkout -q dev && git reset -q --hard HEAD~1 ) >/dev/null 2>&1
   CTX_STATE="$(make_ws)"
   corp_collect_state "$CE_REPO" dev
   corp_state_files "$CTX_STATE" proj
@@ -1722,12 +1720,12 @@ _mk_selfupdate_fixture() {
 }
 
 # запуск установленной копии с подменёнными путями конфига
-_run_su() { XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' bash "$SU_INSTALLED" "$@"; }
+_run_su() { XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" "$@"; }
 
 test_selfupdate_no_mirror_dies() {
   _mk_selfupdate_fixture
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$SU_BASE/empty-xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$SU_BASE/empty-xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
   assert_eq  "self-update: без SELF_MIRROR → die" "$rc" "1"
   assert_has "self-update: подсказка про self.conf" "$out" "SELF_MIRROR"
   rm -rf "$SU_BASE"
@@ -1807,7 +1805,7 @@ test_selfupdate_rejects_no_main_dispatcher() {
   cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
   local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
   assert_eq  "self-update: не-pbx кандидат → die"      "$rc" "1"
   assert_has "self-update: причина — нет диспетчера"   "$out" "диспетчера"
   assert_eq  "self-update: цель не тронута (no-main)" \
@@ -1825,7 +1823,7 @@ test_selfupdate_rejects_syntax_error_with_decoy_main() {
   cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
   local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
   assert_eq  "self-update: decoy-main битый синтаксис → die" "$rc" "1"
   assert_has "self-update: причина — bash -n"                "$out" "bash -n"
   assert_eq  "self-update: цель не тронута (decoy)" \
@@ -1841,7 +1839,7 @@ test_selfupdate_git_workspace_refuses() {
   mkdir -p "$SU_CONFDIR/xdg/pbx"
   cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$wt/pbx" self-update 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$wt/pbx" self-update 2>&1)" || rc=$?
   assert_eq  "self-update: git-workspace → die"  "$rc" "1"
   assert_has "self-update: подсказка git pull"   "$out" "git pull"
   rm -rf "$SU_BASE"
@@ -1852,7 +1850,7 @@ test_selfupdate_preserves_mode() {
   mkdir -p "$SU_CONFDIR/xdg/pbx"
   cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
   chmod 700 "$SU_INSTALLED"
-  ( XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update ) >/dev/null 2>&1
+  ( XDG_CONFIG_HOME="$SU_CONFDIR/xdg" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$SU_INSTALLED" self-update ) >/dev/null 2>&1
   assert_eq "self-update: права 700 сохранены" \
     "$(stat -c %a "$SU_INSTALLED")" "700"
   rm -rf "$SU_BASE"
@@ -1880,23 +1878,23 @@ test_selfupdate_hint_in_snapshot() {
   printf 'SELF_SHA=%s\n' "0000000000000000000000000000000000000000" > "$xdg/pbx/self.rev"
   # плейн-режим: подсказки быть НЕ должно (TTY-only), snapshot работает как раньше
   local out rc=0
-  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash "$PBX" snapshot proj 2>&1)" || rc=$?
+  out="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash "$PBX" snapshot proj 2>&1)" || rc=$?
   assert_eq "hint: snapshot rc=0"                    "$rc" "0"
   assert_no "hint: plain-вывод без подсказки (TTY-only)" "$out" "self-update"
   # реальная точка вызова: cmd_snapshot (одиночный проект) под форсированным UI_COLOR_OUT
   local hint
-  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
     'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
   assert_has "hint: при расхождении SHA есть подсказка (через cmd_snapshot)" "$hint" "self-update"
   # совпадение SHA → подсказки нет
   printf 'SELF_SHA=%s\n' "$(git -C "$sm" rev-parse main)" > "$xdg/pbx/self.rev"
-  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
     'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)"
   assert_no "hint: SHA совпал — подсказки нет (через cmd_snapshot)" "$hint" "self-update"
   # сбой ls-remote (битый URL) → молча, cmd_snapshot всё равно rc=0
   printf 'SELF_MIRROR=%s\n' "$CE_BASE/nope.git" > "$xdg/pbx/self.conf"
   local hrc=0
-  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" bash -c \
+  hint="$(XDG_CONFIG_HOME="$xdg" PBX_REGISTRY_DIR="$SN_REG" PBX_WORKSPACE="$ws" PBX_SELF_MIRROR='' PBX_SELF_BRANCH='' bash -c \
     'source "'"$PBX"'"; UI_COLOR_OUT=1; cmd_snapshot proj' 2>/dev/null)" || hrc=$?
   assert_eq "hint: сбой сети — rc=0 (через cmd_snapshot)"   "$hrc" "0"
   assert_no "hint: сбой сети — молчит (через cmd_snapshot)" "$hint" "self-update"
