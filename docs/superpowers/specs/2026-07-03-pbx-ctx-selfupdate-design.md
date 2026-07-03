@@ -70,11 +70,14 @@ dev sha/date/subj, log.tsv 20 коммитов, branches.tsv, dirty/in_merge REP
 | `pack_stale` | warn | есть архив и он протух (реюз семантики `stale` Э1) |
 | `undelivered_branches` | info | в корп есть ветки ahead>0 — показать списком, на вердикт не влияет |
 
-Механика `home_behind_corp`: `git -C SRC cat-file -e <sha>^{commit}` для
-tip корп-dev; не найден → перебор 20 сокращённых SHA (`%h`) корп-лога
-сверху вниз, первый найденный индекс = N. Неоднозначный короткий SHA
-(cat-file ошибка) трактуется как «не найден» — строгая сторона. Ни одного
-из 20 → `histories_unrelated`.
+Механика `home_behind_corp`: `git -C SRC merge-base --is-ancestor <sha>
+HEAD` для tip корп-dev (уточнение реализации: `cat-file -e` даёт
+false-positive — объект есть в odb через persistent remote-tracking ref,
+хотя из HEAD недостижим; подтверждено исполнением на фикстуре); не предок →
+перебор 20 сокращённых SHA (`%h`) корп-лога сверху вниз тем же способом,
+первый найденный индекс = N. Неоднозначный короткий SHA (ошибка git)
+трактуется как «не найден» — строгая сторона. Ни одного из 20 →
+`histories_unrelated`.
 
 ### 3.3 Вывод
 
