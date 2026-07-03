@@ -1656,9 +1656,15 @@ test_cmd_ctx_json_unknown_corp_null() {
 }
 
 test_cmd_ctx_json_nasty_subjects() {
+  # гадкое ИМЯ ветки (кавычка + кириллица) должно долететь до реального
+  # JSON-поля undelivered.name (branches.tsv → CTX_UNDELIVERED → ctx_json);
+  # в отличие от сабжекта коммита, undelivered.name реально сериализуется —
+  # уборка _json_str_v2 вокруг него ломает JSON и тест это ловит (см. проверку зубов).
   _mk_ctx_fixture
-  ( cd "$CE_REPO" && git commit -qam "$(printf 'таб\tи "кавычки" 100%%')" --allow-empty \
-    && git push -q origin dev ) >/dev/null 2>&1
+  ( cd "$CE_REPO" && git checkout -qb 'feature/за"дача-1' dev \
+    && echo nasty > nasty.txt && git add -A && git commit -qm 'nasty branch' \
+    && git push -q origin 'feature/за"дача-1' \
+    && git checkout -q dev ) >/dev/null 2>&1
   local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
@@ -1668,9 +1674,30 @@ test_cmd_ctx_json_nasty_subjects() {
   out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
   if command -v python3 >/dev/null 2>&1; then
     printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
-      && ok "ctx json: гадкие сабжекты не ломают JSON" \
-      || bad "ctx json: сломан гадкими сабжектами: $out"
+      && ok "ctx json: гадкое имя ветки не ломает JSON" \
+      || bad "ctx json: сломан гадким именем ветки: $out"
   fi
+  assert_has "ctx json: undelivered.name — экранированное имя ветки" "$out" 'за\"дача'
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
+test_cmd_ctx_json_corrupted_meta_numbers() {
+  # битые числа в .meta не должны ломать JSON (regex-guard → -1)
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"; mkdir -p "$ws/_dist"
+  printf 'PACKED_AT=CORRUPTED\nDIRTY_AT_PACK=xyz\nPUSHED_AT=NaN\nCOMMIT=abc\n' > "$ws/_dist/proj.meta"
+  ( PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" PBX_WORKSPACE="$ws" PBX_DIST_DIR="$ws/_dist" bash "$PBX" ctx proj --json 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 \
+      && ok "ctx json: битая мета не ломает JSON" \
+      || bad "ctx json: битая мета СЛОМАЛА JSON: $out"
+  fi
+  assert_has "ctx json: packed_at → -1 при мусоре" "$out" '"packed_at":-1'
   rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
 }
 
@@ -2408,6 +2435,7 @@ test_cmd_ctx_in_help
 test_cmd_ctx_json_valid_and_fields
 test_cmd_ctx_json_unknown_corp_null
 test_cmd_ctx_json_nasty_subjects
+test_cmd_ctx_json_corrupted_meta_numbers
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

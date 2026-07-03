@@ -420,12 +420,13 @@ status_collect() {
     [[ "$ST_META_COMMIT" == '-' ]] && ST_META_COMMIT=''
     [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
     [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
-    [[ -n "$ST_META_PACKED_AT" ]] || ST_META_PACKED_AT=-1
+    [[ "$ST_META_DIRTY" =~ ^-?[0-9]+$ ]] || ST_META_DIRTY=-1
+    [[ "$ST_META_PACKED_AT" =~ ^-?[0-9]+$ ]] || ST_META_PACKED_AT=-1
     ST_PUSH_BRANCH="$(sed -n 's/^PUSH_BRANCH=//p' "$meta")"
     ST_PUSH_COMMIT="$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"
     ST_PUSHED_AT="$(sed -n 's/^PUSHED_AT=//p' "$meta")"
     ST_PUSH_SOURCE="$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$meta")"
-    [[ -n "$ST_PUSHED_AT" ]] || ST_PUSHED_AT=-1
+    [[ "$ST_PUSHED_AT" =~ ^-?[0-9]+$ ]] || ST_PUSHED_AT=-1
   fi
 
   # дрейф от последнего pack
