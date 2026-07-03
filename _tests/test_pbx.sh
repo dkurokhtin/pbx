@@ -1797,6 +1797,42 @@ test_selfupdate_broken_candidate_untouched() {
   rm -rf "$SU_BASE"
 }
 
+test_selfupdate_rejects_no_main_dispatcher() {
+  # валидный bash, но НЕ pbx (нет main-диспетчера) — ловит именно grep-гейт
+  _mk_selfupdate_fixture
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf '#!/usr/bin/env bash\necho ok\n' > pbx && git commit -qam 'not-pbx' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: не-pbx кандидат → die"      "$rc" "1"
+  assert_has "self-update: причина — нет диспетчера"   "$out" "диспетчера"
+  assert_eq  "self-update: цель не тронута (no-main)" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_rejects_syntax_error_with_decoy_main() {
+  # синтаксически битый, но с decoy-строкой main() { — ловит именно bash -n гейт
+  _mk_selfupdate_fixture
+  local work="$SU_BASE/work"
+  ( cd "$work" && printf 'main() {\nif then fi(\n' > pbx && git commit -qam 'decoy-main' \
+    && git push -q "$SU_MIRROR" main ) >/dev/null 2>&1
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  local before; before="$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)"
+  local out rc=0
+  out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update 2>&1)" || rc=$?
+  assert_eq  "self-update: decoy-main битый синтаксис → die" "$rc" "1"
+  assert_has "self-update: причина — bash -n"                "$out" "bash -n"
+  assert_eq  "self-update: цель не тронута (decoy)" \
+    "$(sha1sum "$SU_INSTALLED" | cut -d' ' -f1)" "$before"
+  rm -rf "$SU_BASE"
+}
+
 test_selfupdate_git_workspace_refuses() {
   _mk_selfupdate_fixture
   local wt="$SU_BASE/worktree"
@@ -1808,6 +1844,17 @@ test_selfupdate_git_workspace_refuses() {
   out="$(XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$wt/pbx" self-update 2>&1)" || rc=$?
   assert_eq  "self-update: git-workspace → die"  "$rc" "1"
   assert_has "self-update: подсказка git pull"   "$out" "git pull"
+  rm -rf "$SU_BASE"
+}
+
+test_selfupdate_preserves_mode() {
+  _mk_selfupdate_fixture
+  mkdir -p "$SU_CONFDIR/xdg/pbx"
+  cp "$SU_CONFDIR/self.conf" "$SU_CONFDIR/xdg/pbx/self.conf"
+  chmod 700 "$SU_INSTALLED"
+  ( XDG_CONFIG_HOME="$SU_CONFDIR/xdg" bash "$SU_INSTALLED" self-update ) >/dev/null 2>&1
+  assert_eq "self-update: права 700 сохранены" \
+    "$(stat -c %a "$SU_INSTALLED")" "700"
   rm -rf "$SU_BASE"
 }
 
@@ -2558,7 +2605,10 @@ test_selfupdate_first_install_and_rev
 test_selfupdate_idempotent
 test_selfupdate_check_changes_nothing
 test_selfupdate_broken_candidate_untouched
+test_selfupdate_rejects_no_main_dispatcher
+test_selfupdate_rejects_syntax_error_with_decoy_main
 test_selfupdate_git_workspace_refuses
+test_selfupdate_preserves_mode
 test_selfupdate_in_help
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.

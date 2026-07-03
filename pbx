@@ -2047,7 +2047,7 @@ cmd_self_update() {
   # атомарная замена: staged-файл РЯДОМ (та же ФС) + mv (inode swap —
   # безопасно для исполняющегося bash-скрипта)
   local staged="$real.new.$$"
-  if ! { cp -- "$tmp/pbx.new" "$staged" && chmod +x "$staged" && mv -f -- "$staged" "$real"; } 2>/dev/null; then
+  if ! { cp -- "$tmp/pbx.new" "$staged" && chmod --reference="$real" "$staged" && mv -f -- "$staged" "$real"; } 2>/dev/null; then
     rm -f -- "$staged" 2>/dev/null
     rm -rf "$tmp"
     die "Замена $real не удалась (бэкап цел: $real.bak)"
