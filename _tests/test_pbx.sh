@@ -1550,6 +1550,27 @@ test_cmd_ctx_renders_verdict() {
   rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
 }
 
+test_cmd_ctx_render_glyphs() {
+  # глифы вердикта — контракт рендера: 🔴-маркер и ✗/!-префиксы причин
+  _mk_ctx_fixture
+  local mirror="$CE_BASE/mirror.git"; git init -q --bare "$mirror"
+  local reg; reg="$(make_ws)"
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\n' "$CTX_SRC" "$CE_REPO" "$mirror" > "$reg/proj.conf"
+  local ws; ws="$(make_ws)"
+  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  local out
+  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  assert_has "ctx-глифы: 🔴 у danger-проекта"        "$out" "🔴 proj"
+  assert_has "ctx-глифы: ✗-префикс danger-причины"  "$out" "✗"
+  # обновление дома + пересоздание снимка → warn, без ✗
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ( PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" snapshot proj ) >/dev/null 2>&1
+  out="$(PBX_REGISTRY_DIR="$reg" WORKSPACE="$ws" DIST_DIR="$ws/_dist" bash "$PBX" ctx proj 2>&1)"
+  assert_no  "ctx-глифы: нет 🔴 после обновления"    "$out" "🔴 proj"
+  assert_no  "ctx-глифы: нет ✗ после обновления"     "$out" "✗"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$reg" "$ws"
+}
+
 test_cmd_ctx_no_mirror_dies_plain() {
   _mk_ctx_fixture
   local reg; reg="$(make_ws)"
@@ -2316,6 +2337,7 @@ test_ctx_compare_push_fresh_silent
 test_ctx_compare_undelivered_info
 test_ctx_compare_danger_beats_warn
 test_cmd_ctx_renders_verdict
+test_cmd_ctx_render_glyphs
 test_cmd_ctx_no_mirror_dies_plain
 test_cmd_ctx_all_skips_no_mirror
 test_cmd_ctx_unknown_flag_dies
