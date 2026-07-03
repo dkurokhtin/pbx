@@ -1382,6 +1382,89 @@ test_forge_github() {
   assert_no  "github: без MR-опций"    "$out" "merge_request.create"
   rm -f "$CALLS"
 }
+# --- Э4: pbx ctx — вердикт дом↔корп -------------------------------------------
+# Фикстура: corp-фикстура + домашний SRC (клон origin, отстаёт на 1 коммит) +
+# state-каталог со снимком корп-состояния. Глобали: + CTX_SRC, CTX_STATE
+_mk_ctx_fixture() {
+  _mk_corp_fixture
+  CTX_SRC="$CE_BASE/src"
+  # Дом = клон origin, затем отмотка на 1 коммит назад + очистка рефлога
+  ( git clone -q "$CE_ORIGIN" "$CTX_SRC" 2>/dev/null \
+    && cd "$CTX_SRC" && git config user.email t@t && git config user.name t \
+    && git checkout -q dev && git reset -q --hard HEAD~1 \
+    && git reflog expire --expire=now --all 2>/dev/null \
+    && git gc -q 2>/dev/null ) >/dev/null 2>&1
+  CTX_STATE="$(make_ws)"
+  corp_collect_state "$CE_REPO" dev
+  corp_state_files "$CTX_STATE" proj
+}
+
+# Минимальный набор ST_*-глобалей для ctx_compare (без status_collect)
+_ctx_st_defaults() {
+  ST_SRC="$CTX_SRC"; ST_GIT=true
+  ST_PUSH_COMMIT=''; ST_PUSH_SOURCE=''
+  ST_ARCHIVE_EXISTS=false; ST_STALE=false
+}
+
+test_ctx_compare_unknown_cases() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ctx_compare "$CTX_STATE" 4
+  assert_eq  "ctx: rc=4 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина no_mirror"     "$CTX_REASONS" "no_mirror"
+  ctx_compare "$CTX_STATE" 2
+  assert_eq  "ctx: rc=2 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина no_snapshot"   "$CTX_REASONS" "no_snapshot"
+  ctx_compare "$CTX_STATE" 3
+  assert_eq  "ctx: rc=3 → unknown"        "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина mirror_unreachable" "$CTX_REASONS" "mirror_unreachable"
+  ST_GIT=false
+  ctx_compare "$CTX_STATE" 0
+  assert_eq  "ctx: SRC не git → unknown"  "$CTX_VERDICT" "unknown"
+  assert_has "ctx: причина src_not_git"   "$CTX_REASONS" "src_not_git"
+  assert_has "ctx: corp-поля заполнены и при unknown" "$CTX_BASE_SHA" "$(git -C "$CE_REPO" rev-parse origin/dev)"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_behind_danger() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ctx_compare "$CTX_STATE" 0
+  assert_eq  "ctx: дом отстал → danger"   "$CTX_VERDICT" "danger"
+  assert_has "ctx: причина home_behind_corp" "$CTX_REASONS" "home_behind_corp"
+  assert_eq  "ctx: behind_n = 1"          "$CTX_BEHIND_N" "1"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_ok_when_home_has_tip() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ctx_compare "$CTX_STATE" 0
+  assert_eq "ctx: дом на tip корп-dev → ok" "$CTX_VERDICT" "ok"
+  assert_eq "ctx: behind_n = -1 при ok"     "$CTX_BEHIND_N" "-1"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_unrelated_histories() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  local alien; alien="$(make_ws)"
+  ( git init -q "$alien" && cd "$alien" \
+    && git config user.email a@a && git config user.name a \
+    && echo x > x.txt && git add -A && git commit -qm alien ) >/dev/null 2>&1
+  ST_SRC="$alien"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: несвязанные истории → histories_unrelated" "$CTX_REASONS" "histories_unrelated"
+  assert_eq  "ctx: unrelated — warn, не danger" "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE" "$alien"
+}
+
+test_ctx_compare_no_base_warn() {
+  _mk_ctx_fixture; _ctx_st_defaults
+  sed -i 's/^BASE_SHA=.*/BASE_SHA=-/' "$CTX_STATE/state.env"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: нет base в снимке → no_base" "$CTX_REASONS" "no_base"
+  assert_eq  "ctx: no_base — warn"              "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
 test_forge_none() {
   CALLS="$(mktemp)"; FORGE="none"; TARGET_BRANCH="master"
   forge_push "feature/X-3" "third"
@@ -2096,6 +2179,11 @@ test_die_writes_diag
 test_add_creates_entry
 test_add_refuses_overwrite
 test_valid_project_registry_elsewhere
+test_ctx_compare_unknown_cases
+test_ctx_compare_behind_danger
+test_ctx_compare_ok_when_home_has_tip
+test_ctx_compare_unrelated_histories
+test_ctx_compare_no_base_warn
 
 # Заглушки git/gh — окно теней сведено только к трём forge-тестам ниже.
 git() { printf 'git %s\n' "$*" >> "$CALLS"; }

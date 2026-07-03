@@ -1306,6 +1306,106 @@ cmd_corp() {
   return 0
 }
 
+# =============================================================================
+#  ctx (Э4): автосравнение дом↔корп с вердиктом готовности к доставке.
+#  Композиция живых конвейеров: status_collect (дом) + corp_read_state (снимок
+#  pbx/state зеркала) → ctx_compare → вердикт ok/warn/danger/unknown + причины.
+# =============================================================================
+
+# Порог свежести снимка (сек) — как в corp_render_project (24 ч).
+PBX_CTX_STALE_SEC=86400
+
+# _ctx_reason <code> <level:danger|warn|info> <msg> — причина + эскалация вердикта.
+# info вердикт не поднимает; unknown ставится только явно в ctx_compare.
+_ctx_reason() {
+  CTX_REASONS+="$1"$'\t'"$2"$'\t'"$3"$'\n'
+  case "$2" in
+    danger) CTX_VERDICT='danger' ;;
+    warn)   [[ "$CTX_VERDICT" != danger ]] && CTX_VERDICT='warn' ;;
+  esac
+  return 0
+}
+
+# ctx_compare <state-dir> <rc> — заполняет CTX_*-глобали.
+# rc: 0 — state-файлы в каталоге валидны; 2 — снимка нет; 3 — зеркало
+# недоступно; 4 — нет MIRROR. Требует ST_* (status_collect) при rc=0.
+# Вердикт при сомнении — в сторону строгости (fail-closed).
+ctx_compare() {
+  local d="$1" rc="$2"
+  CTX_VERDICT='ok'; CTX_BEHIND_N=-1; CTX_REASONS=''
+  CTX_SNAPSHOT_AT=-1; CTX_FETCH_OK=''; CTX_BASE_BRANCH=''; CTX_BASE_SHA=''
+  CTX_BASE_DATE=-1; CTX_REPO_DIRTY=-1; CTX_IN_MERGE=''; CTX_UNDELIVERED=''
+
+  case "$rc" in
+    4) _ctx_reason no_mirror warn 'нет MIRROR в реестре — корп-данных нет'
+       CTX_VERDICT='unknown'; return 0 ;;
+    2) _ctx_reason no_snapshot warn 'снимка ещё нет — запусти на ноуте: pbx snapshot'
+       CTX_VERDICT='unknown'; return 0 ;;
+    0) ;;
+    *) _ctx_reason mirror_unreachable warn 'зеркало недоступно (VPN/PAT/URL?)'
+       CTX_VERDICT='unknown'; return 0 ;;
+  esac
+
+  # корп-картина из state.env (читатели sed, как corp_render_project)
+  CTX_SNAPSHOT_AT="$(sed -n 's/^GENERATED_AT=//p' "$d/state.env")"
+  [[ "$CTX_SNAPSHOT_AT" =~ ^[0-9]+$ ]] || CTX_SNAPSHOT_AT=-1
+  CTX_FETCH_OK="$(sed -n 's/^FETCH_OK=//p' "$d/state.env")"
+  CTX_BASE_BRANCH="$(sed -n 's/^BASE_BRANCH=//p' "$d/state.env")"
+  CTX_BASE_SHA="$(sed -n 's/^BASE_SHA=//p' "$d/state.env")"
+  [[ "$CTX_BASE_SHA" == '-' ]] && CTX_BASE_SHA=''
+  CTX_BASE_DATE="$(sed -n 's/^BASE_DATE=//p' "$d/state.env")"
+  [[ "$CTX_BASE_DATE" =~ ^-?[0-9]+$ ]] || CTX_BASE_DATE=-1
+  CTX_REPO_DIRTY="$(sed -n 's/^DIRTY=//p' "$d/state.env")"
+  [[ "$CTX_REPO_DIRTY" =~ ^-?[0-9]+$ ]] || CTX_REPO_DIRTY=-1
+  CTX_IN_MERGE="$(sed -n 's/^IN_MERGE=//p' "$d/state.env")"
+
+  # недоставленное: ветки с ahead>0 (branches.tsv: name where sha7 ahead …)
+  local bname bwhere bsha7 bahead _rest
+  if [[ -s "$d/branches.tsv" ]]; then
+    while IFS=$'\t' read -r bname bwhere bsha7 bahead _rest || [[ -n "$bname" ]]; do
+      [[ -n "$bname" ]] || continue
+      [[ "$bahead" =~ ^[0-9]+$ ]] || continue
+      (( bahead > 0 )) && CTX_UNDELIVERED+="$bname"$'\t'"$bahead"$'\n'
+    done < "$d/branches.tsv"
+  fi
+
+  if [[ "$ST_GIT" != true ]]; then
+    _ctx_reason src_not_git warn 'SRC не git — сравнение историй невозможно'
+    CTX_VERDICT='unknown'
+    return 0
+  fi
+
+  # --- ключевая проверка (SUP-2603): tip корп-dev достижим из дома? ----------
+  if [[ -n "$CTX_BASE_SHA" ]]; then
+    if ! git -C "$ST_SRC" merge-base --is-ancestor "$CTX_BASE_SHA" HEAD 2>/dev/null; then
+      # отставание: первый из 20 сокращённых SHA корп-лога, найденный дома
+      # (строка 1 = сам tip, уже проверен; неоднозначный короткий SHA даёт
+      # ошибку merge-base → «не найден» — строгая сторона)
+      local n=-1 i=0 lsha _ld _ls
+      while IFS=$'\t' read -r lsha _ld _ls || [[ -n "$lsha" ]]; do
+        [[ -n "$lsha" ]] || continue
+        i=$((i+1))
+        (( i == 1 )) && continue
+        if git -C "$ST_SRC" merge-base --is-ancestor "$lsha" HEAD 2>/dev/null; then
+          n=$((i-1)); break
+        fi
+      done < "$d/log.tsv"
+      if (( n > 0 )); then
+        CTX_BEHIND_N=$n
+        _ctx_reason home_behind_corp danger \
+          "дом отстал от корп-dev на $n коммит(ов) — обнови SRC перед доставкой"
+      else
+        _ctx_reason histories_unrelated warn \
+          'не удалось сопоставить истории дом↔корп (отставание >20 или разные репо)'
+      fi
+    fi
+  else
+    _ctx_reason no_base warn 'в снимке нет базовой ветки — сравнение недоступно'
+  fi
+
+  return 0
+}
+
 # Пуш ветки + создание MR/PR согласно FORGE.
 forge_push() {
   local branch="$1" msg="$2"
