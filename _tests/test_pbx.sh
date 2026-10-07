@@ -2254,7 +2254,9 @@ test_snapshot_second_is_fast_forward() {
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
   ( cmd_snapshot proj ) >/dev/null 2>&1
   local tip1; tip1="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
-  ( cmd_snapshot proj ) >/dev/null 2>&1
+  # состояние не менялось — без FORCE второй снимок законно пропускается (Э7);
+  # здесь проверяем цепочку коммитов, поэтому снимаем принудительно
+  ( PBX_SNAPSHOT_FORCE=1 cmd_snapshot proj ) >/dev/null 2>&1
   local tip2; tip2="$(git -C "$CE_MIRROR" rev-parse refs/heads/pbx/state)"
   if [[ "$tip1" != "$tip2" ]] && git -C "$CE_MIRROR" merge-base --is-ancestor "$tip1" "$tip2"; then
     ok "snapshot: второй — fast-forward (parent-chain)"
@@ -2307,7 +2309,7 @@ test_snapshot_all_mode_summary() {
   local out rc=0
   out="$( ( cmd_snapshot ) 2>&1 )" || rc=$?
   assert_eq  "snapshot all: rc=0" "$rc" "0"
-  assert_has "snapshot all: сводка" "$out" "1 снято, 1 пропущено, 0 с ошибками"
+  assert_has "snapshot all: сводка" "$out" "1 снято (из них без изменений: 0), 1 пропущено, 0 с ошибками"
   rm -rf "$CE_BASE" "$SN_REG" "$ws"
 }
 
@@ -2713,6 +2715,85 @@ test_e5_help_mentions() {
   assert_has "help: CORP_SYNC" "$out" "CORP_SYNC"
 }
 
+
+# --- Э7: пропуск неизменного снимка и актуального corp-dev, сетевые повторы ----
+test_e7_snapshot_skips_unchanged() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip1 c1; tip1="$(git -C "$E5_MIRROR" rev-parse pbx/state)"; c1="$(git -C "$E5_MIRROR" rev-parse corp-dev)"
+  local out; out="$( ( cmd_snapshot proj ) 2>&1 )"
+  assert_eq  "e7: неизменный снимок — pbx/state не двинулся" "$(git -C "$E5_MIRROR" rev-parse pbx/state)" "$tip1"
+  assert_has "e7: сообщение про пропуск" "$out" "push пропущен"
+  assert_has "e7: corp-dev актуален — без push" "$out" "уже актуален"
+  _e5_corp_commit 'echo z > z.txt'
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip3; tip3="$(git -C "$E5_MIRROR" rev-parse pbx/state)"
+  [[ "$tip3" != "$tip1" ]] && ok "e7: корп изменился — новый снимок" || bad "e7: корп изменился, а снимок не снят"
+  assert_eq "e7: корп изменился — corp-dev подвинут" \
+    "$(git -C "$E5_MIRROR" rev-parse corp-dev)" "$(git -C "$E5_CORP" rev-parse dev)"
+  [[ "$(git -C "$E5_MIRROR" rev-parse corp-dev)" != "$c1" ]] && ok "e7: corp-dev обновлён" || bad "e7: corp-dev не обновлён"
+  _e5_cleanup
+}
+
+test_e7_snapshot_refreshes_old_unchanged() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local tip1; tip1="$(git -C "$E5_MIRROR" rev-parse pbx/state)"
+  # порог 0 — любой прошлый снимок «старый»: даже без изменений снимаем заново
+  ( PBX_SNAPSHOT_REFRESH_SEC=0 cmd_snapshot proj ) >/dev/null 2>&1
+  [[ "$(git -C "$E5_MIRROR" rev-parse pbx/state)" != "$tip1" ]] \
+    && ok "e7: старый неизменный снимок переснимается (ctx не протухнет)" \
+    || bad "e7: старый снимок не переснят"
+  _e5_cleanup
+}
+
+test_e7_state_normalization_ignores_only_timestamp() {
+  local d; d="$(make_ws)"; git init -q "$d/r"
+  printf 'GENERATED_AT=1\nBASE_SHA=a\n' > "$d/env1"; printf 'GENERATED_AT=2\nBASE_SHA=a\n' > "$d/env2"
+  printf 'GENERATED_AT=3\nBASE_SHA=b\n' > "$d/env3"
+  local f b t1 t2 t3
+  for f in 1 2 3; do
+    local tin=''
+    for n in state.json branches.tsv log.tsv; do
+      b="$(printf '{"x":1,"generated_at":%s}' "$f" | git -C "$d/r" hash-object -w --stdin)"
+      [[ "$n" != state.json ]] && b="$(printf 'same\n' | git -C "$d/r" hash-object -w --stdin)"
+      tin+="100644 blob $b"$'\t'"$n"$'\n'
+    done
+    b="$(git -C "$d/r" hash-object -w "$d/env$f")"; tin+="100644 blob $b"$'\t'"state.env"$'\n'
+    printf -v "t$f" '%s' "$(printf '%s' "$tin" | git -C "$d/r" mktree)"
+  done
+  assert_eq "e7: разница только во времени — одинаково" \
+    "$(_state_normalized "$d/r" "$t1")" "$(_state_normalized "$d/r" "$t2")"
+  [[ "$(_state_normalized "$d/r" "$t1")" != "$(_state_normalized "$d/r" "$t3")" ]] \
+    && ok "e7: смена BASE_SHA — различие видно" || bad "e7: смена BASE_SHA не замечена"
+  rm -rf "$d"
+}
+
+test_e7_net_retry_recovers() {
+  local d; d="$(make_ws)"; local cnt="$d/cnt"; echo 0 > "$cnt"
+  flaky() { local n; n=$(( $(cat "$cnt") + 1 )); echo "$n" > "$cnt"; (( n >= 2 )); }
+  export -f flaky; export cnt
+  local rc=0
+  PBX_NET_TRIES=3 PBX_NET_TIMEOUT=5 _net_retry bash -c flaky || rc=$?
+  assert_eq "e7: _net_retry — со второй попытки rc=0" "$rc" "0"
+  assert_eq "e7: _net_retry — ровно 2 попытки" "$(cat "$cnt")" "2"
+  rc=0; PBX_NET_TRIES=2 PBX_NET_TIMEOUT=5 _net_retry false || rc=$?
+  assert_eq "e7: _net_retry — сдаётся после попыток, rc≠0" "$rc" "1"
+  unset -f flaky; rm -rf "$d"
+}
+
+test_e7_start_distinguishes_missing_and_unreachable() {
+  _mk_e5_fixture
+  git init -q "$E5_SRC"
+  local out
+  out="$( ( PBX_NET_TRIES=1 cmd_start proj fix/x ) 2>&1 )"
+  assert_has "e7: start — ветки нет → «нет»" "$out" "В зеркале нет"
+  sed -i "s#^MIRROR=.*#MIRROR=$E5_BASE/nonexistent.git#" "$E5_REG/proj.conf"
+  out="$( ( PBX_NET_TRIES=1 cmd_start proj fix/x ) 2>&1 )"
+  assert_has "e7: start — зеркало недоступно → «не ответило»" "$out" "не ответило"
+  _e5_cleanup
+}
+
 test_color_gated_in_pipe
 test_ui_flags_nontty
 test_glyphs_ascii_fallback
@@ -2888,6 +2969,11 @@ test_e5_deliver_patch_conflict_rolls_back
 test_e5_deliver_patch_unrelated_needs_base
 test_e5_deliver_patch_flag_validation
 test_e5_help_mentions
+test_e7_snapshot_skips_unchanged
+test_e7_snapshot_refreshes_old_unchanged
+test_e7_state_normalization_ignores_only_timestamp
+test_e7_net_retry_recovers
+test_e7_start_distinguishes_missing_and_unreachable
 test_selfupdate_no_mirror_dies
 test_selfupdate_first_install_and_rev
 test_selfupdate_idempotent

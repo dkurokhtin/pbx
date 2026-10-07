@@ -639,6 +639,33 @@ pack_exclude_pathspecs() {
 # (git push M "":refs/heads/B) — это синтаксис УДАЛЕНИЯ ветки на remote.
 _pbx_is_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]]; }
 
+# Сетевые операции с GitHub-зеркалом временами виснут (провайдер/DPI): один
+# и тот же fetch то висит минуту, то проходит за 3 с. _net_retry повторяет
+# команду до PBX_NET_TRIES раз, каждый — не дольше PBX_NET_TIMEOUT секунд.
+PBX_NET_TRIES="${PBX_NET_TRIES:-3}"
+PBX_NET_TIMEOUT="${PBX_NET_TIMEOUT:-45}"
+_net_retry() {
+  local i rc=1
+  for (( i = 1; i <= PBX_NET_TRIES; i++ )); do
+    GIT_TERMINAL_PROMPT=0 timeout "$PBX_NET_TIMEOUT" "$@" && return 0
+    rc=$?
+    (( i < PBX_NET_TRIES )) && sleep 2
+  done
+  return "$rc"
+}
+
+# _mirror_has_ref <dir> <MIRROR> <ref> — 0: ветка есть; 1: зеркало ответило,
+# ветки нет; 2: зеркало не ответило. Нужен, чтобы не путать сетевой сбой с
+# «ветки нет» в сообщениях.
+_mirror_has_ref() {
+  local out
+  if ! out="$(_net_retry git -C "$1" ls-remote "$2" "$3" 2>/dev/null)"; then
+    return 2
+  fi
+  [[ -n "$out" ]] && return 0
+  return 1
+}
+
 # snapshot_tree <SRC> → SHA дерева (write-tree) ТЕКУЩЕГО рабочего дерева SRC
 # (staged+unstaged+untracked минус excludes). Весь монтаж — в теневом индексе
 # (GIT_INDEX_FILE); реальный .git/index только ЧИТАЕТСЯ (cp).
@@ -1001,6 +1028,32 @@ corp_state_files() {
 # закоммитить в ветку PBX_STATE_BRANCH зеркала. stdout: sha коммита; rc=1 — сбой.
 # КОРП-РЕПО не трогается: файлы во внешнем mktemp, блобы hash-object -w
 # (только object db), дерево mktree (без индекса), у коммита НЕТ корп-родителей.
+# Порог переснятия неизменного снимка: половина PBX_CTX_STALE_SEC (24 ч).
+PBX_SNAPSHOT_REFRESH_SEC="${PBX_SNAPSHOT_REFRESH_SEC:-43200}"
+
+# _state_normalized <repo> <tree-ish> — содержимое state-файлов без меток
+# времени генерации (единственное, что меняется от запуска к запуску).
+_state_normalized() {
+  local repo="$1" t="$2" f
+  for f in state.json state.env branches.tsv log.tsv; do
+    printf '== %s\n' "$f"
+    git -C "$repo" cat-file blob "$t:$f" 2>/dev/null \
+      | sed -e '/^GENERATED_AT=/d' -e 's/,"generated_at":[0-9]*//'
+  done
+}
+
+# snapshot_state_unchanged <repo> <prev-commit> <new-tree> — 0, если новое
+# состояние совпадает с прошлым и прошлый снимок свежее порога переснятия.
+snapshot_state_unchanged() {
+  local repo="$1" prev="$2" tree="$3"
+  local prev_at now
+  prev_at="$(git -C "$repo" cat-file blob "$prev:state.env" 2>/dev/null | sed -n 's/^GENERATED_AT=//p')"
+  [[ "$prev_at" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  (( now - prev_at < PBX_SNAPSHOT_REFRESH_SEC )) || return 1
+  [[ "$(_state_normalized "$repo" "$prev")" == "$(_state_normalized "$repo" "$tree")" ]]
+}
+
 snapshot_push() {
   local repo="$1" mirror="$2" project="$3"
   [[ -e "$repo/.git" ]] || { c_warn "snapshot: не git-репозиторий: $repo"; return 1; }
@@ -1038,6 +1091,21 @@ snapshot_push() {
 
   local branch_exists=0
   [[ -n "$ls_out" ]] && branch_exists=1
+
+  # Пропуск неизменного снимка (Э7): если корп-состояние то же, что в прошлом
+  # снимке (сравнение без GENERATED_AT/generated_at), и прошлому снимку меньше
+  # PBX_SNAPSHOT_REFRESH_SEC — коммит и push не нужны. Порог — половина срока
+  # «снимок протух» у ctx, поэтому пропуск не доводит ctx до протухания.
+  if (( branch_exists )) && [[ "${PBX_SNAPSHOT_FORCE:-0}" != 1 ]]; then
+    local prev_tip=""
+    if _net_retry git -C "$repo" fetch -q "$mirror" "$PBX_STATE_BRANCH" 2>/dev/null; then
+      prev_tip="$(git -C "$repo" rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+    fi
+    if _pbx_is_sha "$prev_tip" && snapshot_state_unchanged "$repo" "$prev_tip" "$tree"; then
+      printf '%s unchanged\n' "$prev_tip"
+      return 0
+    fi
+  fi
 
   local attempt max_attempts=3
   for attempt in $(seq 1 "$max_attempts"); do
@@ -1104,6 +1172,14 @@ corp_sync_push() {
   local tip; tip="$(git -C "$repo" rev-parse -q --verify "$src_ref" 2>/dev/null || true)"
   _pbx_is_sha "$tip" || { c_warn "corp-sync: нет origin/$base в $repo — пропуск"; return 1; }
   local dst; dst="$(corp_mirror_branch "$base")"
+  # Зеркало уже знает этот tip — push не нужен (Э7): одна сверка ls-remote
+  # дешевле переговоров push, а на неизменном корпе это обычный случай.
+  local remote_line
+  if remote_line="$(_net_retry git -C "$repo" ls-remote "$mirror" "refs/heads/$dst" 2>/dev/null)" \
+     && [[ "${remote_line%%[[:space:]]*}" == "$tip" ]]; then
+    printf '%s unchanged\n' "$tip"
+    return 0
+  fi
   local out rc=0
   out="$(GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" push -q "$mirror" \
     "+$tip:refs/heads/$dst" 2>&1)" || rc=$?
@@ -1130,11 +1206,19 @@ cmd_snapshot() {
     ui_kv BASE "$BASE_BRANCH"
     local sha
     sha="$(snapshot_push "$REPO" "$MIRROR" "$project")" || die "pbx snapshot не удался (см. вывод выше)"
-    c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    if [[ "$sha" == *" unchanged" ]]; then
+      c_green "✅ $project: корп-состояние не изменилось — снимок ${sha:0:7} актуален, push пропущен"
+    else
+      c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    fi
     if [[ "$CORP_SYNC" == 1 ]]; then
       local csha
       if csha="$(corp_sync_push "$REPO" "$MIRROR" "$BASE_BRANCH")"; then
-        c_green "✅ $project: корп-$BASE_BRANCH → зеркало '$(corp_mirror_branch)' (${csha:0:7})"
+        if [[ "$csha" == *" unchanged" ]]; then
+          c_green "✅ $project: '$(corp_mirror_branch)' в зеркале уже актуален (${csha:0:7})"
+        else
+          c_green "✅ $project: корп-$BASE_BRANCH → зеркало '$(corp_mirror_branch)' (${csha:0:7})"
+        fi
       fi
     fi
     self_update_hint
@@ -1149,7 +1233,7 @@ cmd_snapshot() {
     c_warn "  (проектов не найдено)"
     return 0
   fi
-  local p snapped=0 skipped=0 failed=0 sha
+  local p snapped=0 skipped=0 failed=0 unchanged=0 sha
   for p in "${names[@]}"; do
     load_config "$p"
     if [[ ! -e "$REPO/.git" || -z "${MIRROR:-}" ]]; then
@@ -1159,12 +1243,21 @@ cmd_snapshot() {
     fi
     sha=''
     if sha="$(snapshot_push "$REPO" "$MIRROR" "$p")"; then
-      c_green "  ✅ $p: снимок ${sha:0:7}"
+      if [[ "$sha" == *" unchanged" ]]; then
+        c_green "  ✅ $p: без изменений (${sha:0:7}), push пропущен"
+        unchanged=$((unchanged+1))
+      else
+        c_green "  ✅ $p: снимок ${sha:0:7}"
+      fi
       snapped=$((snapped+1))
       if [[ "$CORP_SYNC" == 1 ]]; then
         local csha
         if csha="$(corp_sync_push "$REPO" "$MIRROR" "$BASE_BRANCH")"; then
-          c_green "     ↳ корп-$BASE_BRANCH → '$(corp_mirror_branch)' ${csha:0:7}"
+          if [[ "$csha" == *" unchanged" ]]; then
+            c_green "     ↳ '$(corp_mirror_branch)' актуален"
+          else
+            c_green "     ↳ корп-$BASE_BRANCH → '$(corp_mirror_branch)' ${csha:0:7}"
+          fi
         fi
       fi
     else
@@ -1172,7 +1265,7 @@ cmd_snapshot() {
       failed=$((failed+1))
     fi
   done
-  c_blue "🔵 Итог: $snapped снято, $skipped пропущено, $failed с ошибками"
+  c_blue "🔵 Итог: $snapped снято (из них без изменений: $unchanged), $skipped пропущено, $failed с ошибками"
   self_update_hint
   if (( failed > 0 && snapped == 0 )); then return 1; fi
   return 0
@@ -1717,9 +1810,13 @@ cmd_start() {
   corp_branch="$(corp_mirror_branch)"
   ref="refs/remotes/pbx-mirror/$corp_branch"
   ui_section "Старт $project" "🔵 $project: ветка '$branch' от '$corp_branch' зеркала"
-  if ! GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$SRC" fetch -q "$MIRROR" \
-      "+refs/heads/$corp_branch:$ref" 2>/dev/null; then
-    die "В зеркале нет '$corp_branch' (или оно недоступно). На ноуте: pbx snapshot $project — он выкладывает корп-$BASE_BRANCH."
+  if ! _net_retry git -C "$SRC" fetch -q "$MIRROR" "+refs/heads/$corp_branch:$ref" 2>/dev/null; then
+    local has=0
+    _mirror_has_ref "$SRC" "$MIRROR" "refs/heads/$corp_branch" || has=$?
+    case "$has" in
+      1) die "В зеркале нет '$corp_branch'. На ноуте: pbx snapshot $project — он выкладывает корп-$BASE_BRANCH." ;;
+      *) die "Зеркало не ответило ($MIRROR) за $PBX_NET_TRIES попытки — сеть до GitHub. Повтори через минуту." ;;
+    esac
   fi
   git -C "$SRC" checkout -q --no-track -b "$branch" "$ref" \
     || die "Не удалось создать ветку '$branch' от $ref"
@@ -1740,8 +1837,13 @@ cmd_start() {
 deliver_apply_patch() {
   local branch="$1" from="$2" base="$3"
   c_blue "🔵 Забираю '$from' из зеркала (патч-режим)"
-  if ! GIT_TERMINAL_PROMPT=0 timeout 60 git fetch -q "$MIRROR" "$from" 2>/dev/null; then
-    die "Не удалось получить '$from' из зеркала ($MIRROR). Проверь имя ветки (дома: pbx push <проект> <ветка>) и доступ."
+  if ! _net_retry git fetch -q "$MIRROR" "$from" 2>/dev/null; then
+    local has=0
+    _mirror_has_ref . "$MIRROR" "refs/heads/$from" || has=$?
+    case "$has" in
+      1) die "В зеркале нет ветки '$from'. Дома: pbx push <проект> $from" ;;
+      *) die "Зеркало не ответило ($MIRROR) за $PBX_NET_TRIES попытки — сеть до GitHub. Повтори через минуту." ;;
+    esac
   fi
   local snap; snap="$(git rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
   _pbx_is_sha "$snap" || die "FETCH_HEAD после fetch '$from' пуст"
