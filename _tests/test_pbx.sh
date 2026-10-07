@@ -1488,14 +1488,34 @@ test_ctx_compare_repo_dirty_and_merge() {
 
 test_ctx_compare_push_and_pack_stale() {
   _mk_ctx_fixture; _ctx_st_defaults
-  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev \
+    && git config user.email t@t && git config user.name t \
+    && echo work > ctx-work.txt && git add -A && git commit -qm work ) >/dev/null 2>&1
   ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   ST_PUSH_SOURCE="0000000000000000000000000000000000000000"   # != HEAD SRC
   ST_ARCHIVE_EXISTS=true; ST_STALE=true
   ctx_compare "$CTX_STATE" 0
-  assert_has "ctx: push отстаёт → push_stale" "$CTX_REASONS" "push_stale"
-  assert_has "ctx: архив протух → pack_stale" "$CTX_REASONS" "pack_stale"
+  assert_has "ctx: есть работа и push отстаёт → push_stale" "$CTX_REASONS" "push_stale"
+  assert_no  "ctx: архив протух — в ctx больше не шумит (Э6)" "$CTX_REASONS" "pack_stale"
   assert_eq  "ctx: warn-вердикт"              "$CTX_VERDICT" "warn"
+  rm -rf "$CE_BASE" "$CTX_STATE"
+}
+
+test_ctx_compare_home_equals_corp_quiet() {
+  # дом = корп-tip, работы нет: ни push_stale, ни pack_stale, вердикт ok
+  _mk_ctx_fixture; _ctx_st_defaults
+  ( cd "$CTX_SRC" && git fetch -q origin && git reset -q --hard origin/dev ) >/dev/null 2>&1
+  ST_PUSH_COMMIT="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ST_PUSH_SOURCE="0000000000000000000000000000000000000000"
+  ST_ARCHIVE_EXISTS=true; ST_STALE=true
+  ctx_compare "$CTX_STATE" 0
+  assert_no "ctx: дом = корп → push_stale молчит" "$CTX_REASONS" "push_stale"
+  assert_eq "ctx: дом = корп → ok"                "$CTX_VERDICT" "ok"
+  # незакоммиченная правка отслеживаемого файла — это работа
+  local f; f="$(git -C "$CTX_SRC" ls-files | head -1)"
+  echo dirty >> "$CTX_SRC/$f"
+  ctx_compare "$CTX_STATE" 0
+  assert_has "ctx: незакоммиченная правка — push_stale" "$CTX_REASONS" "push_stale"
   rm -rf "$CE_BASE" "$CTX_STATE"
 }
 
@@ -2842,6 +2862,7 @@ test_ctx_compare_no_base_warn
 test_ctx_compare_snapshot_stale_and_no_vpn
 test_ctx_compare_repo_dirty_and_merge
 test_ctx_compare_push_and_pack_stale
+test_ctx_compare_home_equals_corp_quiet
 test_ctx_compare_push_fresh_silent
 test_ctx_compare_undelivered_info
 test_ctx_compare_danger_beats_warn
