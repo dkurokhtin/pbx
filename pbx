@@ -1945,8 +1945,24 @@ cmd_deliver() {
   # Не раздувать MR mode-изменениями (Windows ставит 0755 всем файлам)
   git config core.fileMode false
 
+  # ---- предстарт (Э8): репо на BASE_BRANCH и чистое ------------------------
+  # Раньше checkout шёл молча: с правками от прерванной доставки он либо падал
+  # невнятной ошибкой git, либо утаскивал их в новую доставку.
+  local cur_branch
+  cur_branch="$(git branch --show-current 2>/dev/null || true)"
+  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    git status --short --untracked-files=no >&2
+    die "В $repo незакоммиченные правки (ветка '${cur_branch:-detached}') — похоже на остаток прерванной доставки. Посмотри список выше; если он не нужен: git -C $repo checkout -f $BASE_BRANCH"
+  fi
+  if git rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1; then
+    die "Ветка '$branch' на ноуте уже есть (после мержа MR имя не освобождается) — возьми другое имя или удали старую: git -C $repo branch -D $branch"
+  fi
+  if [[ "$cur_branch" != "$BASE_BRANCH" ]]; then
+    c_blue "🔵 Репо на ветке '${cur_branch:-detached}' — переключаюсь на '$BASE_BRANCH'"
+  fi
+
   ui_section "Обновляю $BASE_BRANCH"
-  git checkout "$BASE_BRANCH"
+  git checkout "$BASE_BRANCH" || die "Не удалось переключиться на '$BASE_BRANCH' в $repo"
   git pull origin "$BASE_BRANCH"
 
   PATCH_EMPTY=0
@@ -2033,6 +2049,10 @@ cmd_deliver() {
 
   git commit -m "$msg"
   forge_push "$branch" "$msg"
+  # Репо — обратно на BASE_BRANCH (Э8): следующая доставка и snapshot
+  # стартуют с базовой ветки, а не с ветки этой доставки.
+  git checkout -q "$BASE_BRANCH" 2>/dev/null \
+    || c_warn "⚠️  Не удалось вернуть $repo на '$BASE_BRANCH' — следующая доставка переключит сама"
 
   case "$FORGE" in
     none) c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH' запушена (без MR/PR) — «$msg».";;

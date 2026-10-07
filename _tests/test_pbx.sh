@@ -1141,8 +1141,9 @@ test_deliver_uses_repo() {
   cmd_deliver "proj" "feature/T-1" "тест" "$dist/proj.tar.gz" --yes >/dev/null 2>&1
   assert_eq "deliver снял RETURN-trap (не течёт в вызывающий шелл)" "$(trap -p RETURN)" ""
 
-  assert_eq "deliver: файл синкнут в REPO" "$(cat "$repo/file.txt")" "new"
-  assert_has "deliver: added.txt в REPO"   "$(ls "$repo")" "added.txt"
+  assert_eq "deliver: файл синкнут в REPO" "$(git -C "$repo" show feature/T-1:file.txt)" "new"
+  assert_has "deliver: added.txt в REPO"   "$(git -C "$repo" ls-tree --name-only feature/T-1)" "added.txt"
+  assert_eq "deliver: после пуша REPO вернулся на dev (Э8)" "$(git -C "$repo" branch --show-current)" "dev"
   local pushed; pushed="$(git -C "$remote" branch --list feature/T-1)"
   assert_has "deliver: ветка запушена в remote" "$pushed" "feature/T-1"
   cd "$HERE"   # cmd_deliver сделал cd "$repo" в текущем шелле — вернуться перед rm -rf
@@ -1180,6 +1181,8 @@ test_deliver_guard_blocks_deletions() {
   assert_eq "guard: доставка с удалением без --yes прервана (rc=1)" "$rc" "1"
   assert_eq "guard: ветка НЕ запушена при отмене" "$(git -C "$remote" branch --list feature/T-2)" ""
 
+  # откат по подсказке guard — иначе предстарт (Э8) законно остановит следующую доставку
+  git -C "$repo" checkout -q -f dev && git -C "$repo" branch -q -D feature/T-2
   # с --yes guard пропускает — доставка проходит и пушится (даже с удалением)
   ( cmd_deliver "proj" "feature/T-3" "msg" "$dist/proj.tar.gz" --yes </dev/null >/dev/null 2>&1 )
   assert_has "guard: --yes пропускает доставку (ветка запушена)" \
@@ -1243,10 +1246,10 @@ _mk_mirror_deliver_fixture() {
 test_deliver_mirror_e2e() {
   _mk_mirror_deliver_fixture
   ( cmd_deliver proj "feature/M-1" "mirror-доставка" --mirror --yes </dev/null ) >/dev/null 2>&1
-  assert_eq  "mirror-deliver: правка доехала"    "$(cat "$MD_REPO/file.txt")" "changed"
-  assert_has "mirror-deliver: новый файл доехал (с незакоммиченным)" "$(cat "$MD_REPO/new.txt")" "more"
-  [[ -f "$MD_REPO/roles.txt" ]] && bad "mirror-deliver: удаление НЕ отражено" || ok "mirror-deliver: удаление отражено"
-  assert_eq  "mirror-deliver: .gitlab-ci.yml жив (sync-exclude)" "$(cat "$MD_REPO/.gitlab-ci.yml")" "ci"
+  assert_eq  "mirror-deliver: правка доехала"    "$(git -C "$MD_REPO" show feature/M-1:file.txt)" "changed"
+  assert_has "mirror-deliver: новый файл доехал (с незакоммиченным)" "$(git -C "$MD_REPO" show feature/M-1:new.txt)" "more"
+  git -C "$MD_REPO" cat-file -e feature/M-1:roles.txt 2>/dev/null && bad "mirror-deliver: удаление НЕ отражено" || ok "mirror-deliver: удаление отражено"
+  assert_eq  "mirror-deliver: .gitlab-ci.yml жив (sync-exclude)" "$(git -C "$MD_REPO" show feature/M-1:.gitlab-ci.yml)" "ci"
   assert_has "mirror-deliver: ветка запушена" \
     "$(git -C "$MD_REMOTE" branch --list 'feature/M-1')" "feature/M-1"
   cd "$HERE"; rm -rf "$MD_BASE" "$MD_REG"
@@ -2630,16 +2633,17 @@ test_e5_deliver_patch_e2e() {
   # пока работали дома — в корп влили чужое и DevOps поменял CI
   _e5_corp_commit 'echo theirs > other.txt && echo ci2 > .gitlab-ci.yml'
   ( cd "$E5_REPO" && cmd_deliver proj "feature/X-1" "патч-доставка" --patch --from fix/x --yes </dev/null ) >/dev/null 2>&1
-  assert_eq  "patch: ветка доставки текущая" "$(git -C "$E5_REPO" branch --show-current)" "feature/X-1"
-  assert_eq  "patch: наша правка доехала" "$(cat "$E5_REPO/file.txt")" "changed"
-  assert_has "patch: новый файл с незакоммиченным" "$(cat "$E5_REPO/new.txt")" "more"
-  assert_eq  "patch: чужая влитая работа цела" "$(cat "$E5_REPO/other.txt" 2>/dev/null)" "theirs"
-  assert_eq  "patch: CI DevOps не откатился" "$(cat "$E5_REPO/.gitlab-ci.yml")" "ci2"
-  assert_eq  "patch: файл, которого дома не трогали, не удалён" "$(cat "$E5_REPO/roles.txt" 2>/dev/null)" "role"
+  local B=feature/X-1
+  assert_eq  "patch: после пуша REPO вернулся на dev (Э8)" "$(git -C "$E5_REPO" branch --show-current)" "dev"
+  assert_eq  "patch: наша правка доехала" "$(git -C "$E5_REPO" show $B:file.txt)" "changed"
+  assert_has "patch: новый файл с незакоммиченным" "$(git -C "$E5_REPO" show $B:new.txt)" "more"
+  assert_eq  "patch: чужая влитая работа цела" "$(git -C "$E5_REPO" show $B:other.txt 2>/dev/null)" "theirs"
+  assert_eq  "patch: CI DevOps не откатился" "$(git -C "$E5_REPO" show $B:.gitlab-ci.yml)" "ci2"
+  assert_eq  "patch: файл, которого дома не трогали, не удалён" "$(git -C "$E5_REPO" show $B:roles.txt 2>/dev/null)" "role"
   assert_eq  "patch: родитель коммита = свежий корп-dev" \
-    "$(git -C "$E5_REPO" rev-parse HEAD^)" "$(git -C "$E5_CORP" rev-parse dev)"
+    "$(git -C "$E5_REPO" rev-parse $B^)" "$(git -C "$E5_CORP" rev-parse dev)"
   assert_eq  "patch: в коммите ровно наши 2 файла" \
-    "$(git -C "$E5_REPO" diff --name-only HEAD^ HEAD | sort | tr '\n' ' ')" "file.txt new.txt "
+    "$(git -C "$E5_REPO" diff --name-only $B^ $B | sort | tr '\n' ' ')" "file.txt new.txt "
   assert_has "patch: ветка запушена в корп" "$(git -C "$E5_CORP" branch --list 'feature/X-1')" "feature/X-1"
   assert_eq  "patch: домашние коммиты в корп не ушли (родитель — корп)" \
     "$(git -C "$E5_CORP" rev-list --count feature/X-1)" "3"
@@ -2653,7 +2657,7 @@ test_e5_deliver_patch_from_defaults_to_branch() {
   ( cd "$E5_SRC" && echo v2 > file.txt && git commit -qam w ) >/dev/null 2>&1
   ( push_snapshot "$E5_SRC" "$E5_MIRROR" feature/X-2 proj ) >/dev/null 2>&1
   ( cd "$E5_REPO" && cmd_deliver proj "feature/X-2" "msg" --patch --yes </dev/null ) >/dev/null 2>&1
-  assert_eq "patch: без --from берётся ветка с именем доставки" "$(cat "$E5_REPO/file.txt")" "v2"
+  assert_eq "patch: без --from берётся ветка с именем доставки" "$(git -C "$E5_REPO" show feature/X-2:file.txt)" "v2"
   _e5_cleanup
 }
 
@@ -2689,9 +2693,9 @@ test_e5_deliver_patch_unrelated_needs_base() {
   assert_eq  "patch: несвязанная история без --base → die" "$rc" "1"
   assert_has "patch: подсказка про --base" "$out" "--base"
   ( cd "$E5_REPO" && cmd_deliver proj "feature/U-1" "msg" --patch --from fix/u --base "$home_base" --yes </dev/null ) >/dev/null 2>&1
-  assert_eq  "patch: с --base дифф лёг" "$(cat "$E5_REPO/file.txt")" "upd"
+  assert_eq  "patch: с --base дифф лёг" "$(git -C "$E5_REPO" show feature/U-1:file.txt)" "upd"
   assert_eq  "patch: с --base лишнего нет" \
-    "$(git -C "$E5_REPO" diff --name-only HEAD^ HEAD)" "file.txt"
+    "$(git -C "$E5_REPO" diff --name-only feature/U-1^ feature/U-1)" "file.txt"
   _e5_cleanup
 }
 
@@ -2791,6 +2795,43 @@ test_e7_start_distinguishes_missing_and_unreachable() {
   sed -i "s#^MIRROR=.*#MIRROR=$E5_BASE/nonexistent.git#" "$E5_REG/proj.conf"
   out="$( ( PBX_NET_TRIES=1 cmd_start proj fix/x ) 2>&1 )"
   assert_has "e7: start — зеркало недоступно → «не ответило»" "$out" "не ответило"
+  _e5_cleanup
+}
+
+
+# --- Э8: предстарт deliver — репо на BASE и чистое, возврат на BASE после пуша ---
+test_e8_deliver_switches_from_other_branch() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start fix/s
+  ( cd "$E5_SRC" && echo s > file.txt && git commit -qam s ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/s proj ) >/dev/null 2>&1
+  git -C "$E5_REPO" checkout -q -b old-work
+  local out; out="$( ( cmd_deliver proj fix/s "msg" --patch --yes </dev/null ) 2>&1 )"
+  assert_has "e8: с чужой ветки — явное переключение" "$out" "переключаюсь на 'dev'"
+  assert_eq  "e8: доставка прошла (ветка запушена)" "$(git -C "$E5_CORP" branch --list fix/s | tr -d ' ')" "fix/s"
+  assert_eq  "e8: после — REPO на dev" "$(git -C "$E5_REPO" branch --show-current)" "dev"
+  _e5_cleanup
+}
+
+test_e8_deliver_refuses_dirty_repo() {
+  _mk_e5_fixture
+  echo leftover >> "$E5_REPO/file.txt"
+  local rc=0 out
+  out="$( ( cmd_deliver proj fix/d "msg" --patch --yes </dev/null ) 2>&1 )" || rc=$?
+  assert_eq  "e8: грязный REPO — стоп (rc=1)" "$rc" "1"
+  assert_has "e8: понятная причина и команда отката" "$out" "checkout -f dev"
+  assert_eq  "e8: правки не тронуты" "$(tail -1 "$E5_REPO/file.txt")" "leftover"
+  _e5_cleanup
+}
+
+test_e8_deliver_refuses_existing_branch_early() {
+  _mk_e5_fixture
+  git -C "$E5_REPO" branch fix/old
+  local rc=0 out
+  out="$( ( cmd_deliver proj fix/old "msg" --patch --yes </dev/null ) 2>&1 )" || rc=$?
+  assert_eq  "e8: ветка уже есть — стоп до любых действий" "$rc" "1"
+  assert_has "e8: подсказка про другое имя" "$out" "уже есть"
   _e5_cleanup
 }
 
@@ -2974,6 +3015,9 @@ test_e7_snapshot_refreshes_old_unchanged
 test_e7_state_normalization_ignores_only_timestamp
 test_e7_net_retry_recovers
 test_e7_start_distinguishes_missing_and_unreachable
+test_e8_deliver_switches_from_other_branch
+test_e8_deliver_refuses_dirty_repo
+test_e8_deliver_refuses_existing_branch_early
 test_selfupdate_no_mirror_dies
 test_selfupdate_first_install_and_rev
 test_selfupdate_idempotent
