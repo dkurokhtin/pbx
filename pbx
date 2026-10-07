@@ -61,6 +61,7 @@ load_config() {
   BASE_BRANCH="dev"; TARGET_BRANCH="dev"; FORGE="gitlab"
   EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=()
   SRC=""; REPO=""; MIRROR=""
+  CORP_SYNC=1   # snapshot выкладывает корп-BASE_BRANCH в зеркало (corp-<BASE_BRANCH>)
   # 2) глобальный конфиг
   [[ -f "$WORKSPACE/.pbx.conf" ]] && source "$WORKSPACE/.pbx.conf"
   # 3) реестр проекта (центральный)
@@ -80,7 +81,7 @@ load_config() {
   REPO="${REPO:-$PROJECTS_ROOT/$project}"
   # 7) защита от CRLF (конфиги на /mnt/c часто с \r), включая SRC/REPO
   local __v __i
-  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO MIRROR; do
+  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO MIRROR CORP_SYNC; do
     printf -v "$__v" '%s' "${!__v//$'\r'/}"
   done
   for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
@@ -1086,6 +1087,35 @@ snapshot_push() {
   return 1
 }
 
+# Ветка зеркала с корп-историей BASE_BRANCH: corp-dev, corp-master…
+corp_mirror_branch() { printf 'corp-%s\n' "${1:-$BASE_BRANCH}"; }
+
+# corp_sync_push <REPO> <MIRROR> <BASE> — обратная связка: корп-<BASE> (по
+# последнему fetch origin, его делает corp_collect_state) уходит в зеркало
+# веткой corp-<BASE>. В отличие от pbx/state это ОСОЗНАННО тащит корп-историю в
+# личное зеркало (рабочий рецепт пользователя, раньше делался руками) — дома
+# от неё стартуют задачи (pbx start), а deliver --patch считает от неё базу.
+# Выключается CORP_SYNC=0 в conf проекта. Force: зеркало — копия корпа, корп
+# прав; расхождение у зеркала значит лишь, что ветку раньше клали руками.
+# Не фатально: rc≠0 только предупреждает, снимок уже ушёл.
+corp_sync_push() {
+  local repo="$1" mirror="$2" base="$3"
+  local src_ref="refs/remotes/origin/$base"
+  local tip; tip="$(git -C "$repo" rev-parse -q --verify "$src_ref" 2>/dev/null || true)"
+  _pbx_is_sha "$tip" || { c_warn "corp-sync: нет origin/$base в $repo — пропуск"; return 1; }
+  local dst; dst="$(corp_mirror_branch "$base")"
+  local out rc=0
+  out="$(GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" push -q "$mirror" \
+    "+$tip:refs/heads/$dst" 2>&1)" || rc=$?
+  if (( rc != 0 )); then
+    c_warn "corp-sync: push $dst в зеркало не удался (rc=$rc):"
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  printf '%s\n' "$tip"
+  return 0
+}
+
 cmd_snapshot() {
   local project; project="$(strip_cr "${1:-}")"
   if [[ -n "$project" ]]; then
@@ -1101,6 +1131,12 @@ cmd_snapshot() {
     local sha
     sha="$(snapshot_push "$REPO" "$MIRROR" "$project")" || die "pbx snapshot не удался (см. вывод выше)"
     c_green "✅ $project: состояние корп-репо ушло в зеркало ('$PBX_STATE_BRANCH', ${sha:0:7})"
+    if [[ "$CORP_SYNC" == 1 ]]; then
+      local csha
+      if csha="$(corp_sync_push "$REPO" "$MIRROR" "$BASE_BRANCH")"; then
+        c_green "✅ $project: корп-$BASE_BRANCH → зеркало '$(corp_mirror_branch)' (${csha:0:7})"
+      fi
+    fi
     self_update_hint
     return 0
   fi
@@ -1125,6 +1161,12 @@ cmd_snapshot() {
     if sha="$(snapshot_push "$REPO" "$MIRROR" "$p")"; then
       c_green "  ✅ $p: снимок ${sha:0:7}"
       snapped=$((snapped+1))
+      if [[ "$CORP_SYNC" == 1 ]]; then
+        local csha
+        if csha="$(corp_sync_push "$REPO" "$MIRROR" "$BASE_BRANCH")"; then
+          c_green "     ↳ корп-$BASE_BRANCH → '$(corp_mirror_branch)' ${csha:0:7}"
+        fi
+      fi
     else
       c_warn "  ❌ $p: снимок не удался"
       failed=$((failed+1))
@@ -1631,25 +1673,131 @@ forge_push() {
   esac
 }
 
+# ---- start (дом) -------------------------------------------------------------
+# Новая задача от свежего корпа: ветка в SRC от corp-<BASE> из зеркала (его
+# выкладывает pbx snapshot на ноуте). Так история дома совпадает с корпом по
+# SHA: pbx ctx даёт точный вердикт, а deliver --patch сам находит базу.
+# corp-<BASE> кладём в refs/remotes/pbx-mirror/ — не локальная ветка, чтобы
+# fetch не упирался в «нельзя обновить текущую ветку».
+cmd_start() {
+  local project branch
+  project="$(strip_cr "${1:?Использование: pbx start <проект> <ветка>}")"
+  branch="$(strip_cr "${2:?Укажи имя новой ветки 2-м аргументом}")"
+  PBX_CURRENT_PROJECT="$project"
+  valid_project "$project"
+  load_config "$project"
+  [[ -e "$SRC/.git" ]] || die "SRC не git-репозиторий: $SRC"
+  [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' (нужен corp-$BASE_BRANCH из зеркала)."
+  if git -C "$SRC" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1; then
+    die "Ветка '$branch' в SRC уже есть — выбери другое имя."
+  fi
+  if ! git -C "$SRC" diff --quiet 2>/dev/null || ! git -C "$SRC" diff --cached --quiet 2>/dev/null; then
+    die "В SRC есть незакоммиченные правки отслеживаемых файлов — закоммить или убери в stash, затем повтори."
+  fi
+
+  local corp_branch ref
+  corp_branch="$(corp_mirror_branch)"
+  ref="refs/remotes/pbx-mirror/$corp_branch"
+  ui_section "Старт $project" "🔵 $project: ветка '$branch' от '$corp_branch' зеркала"
+  if ! GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$SRC" fetch -q "$MIRROR" \
+      "+refs/heads/$corp_branch:$ref" 2>/dev/null; then
+    die "В зеркале нет '$corp_branch' (или оно недоступно). На ноуте: pbx snapshot $project — он выкладывает корп-$BASE_BRANCH."
+  fi
+  git -C "$SRC" checkout -q --no-track -b "$branch" "$ref" \
+    || die "Не удалось создать ветку '$branch' от $ref"
+  local tip; tip="$(git -C "$SRC" rev-parse --short "$ref")"
+  c_green "✅ $project: ветка '$branch' от корп-$BASE_BRANCH ($tip)."
+  ui_dim "Дальше: правки → pbx push $project $branch → на ноуте: pbx deliver $project <ветка> \"<сообщение>\" --patch --from $branch"
+  return 0
+}
+
+# deliver_apply_patch <ветка доставки> <ветка зеркала> [база]
+# Патч-режим (Э5): вместо rsync --delete всего снапшота — ТОЛЬКО наш дифф
+# «база → снапшот» поверх свежего BASE_BRANCH. Чужая влитая работа и файлы
+# DevOps не трогаются: патч их просто не содержит. Вызывается из cmd_deliver
+# в $REPO на свежем BASE_BRANCH; оставляет ветку <ветка доставки> со staged
+# изменениями (дальше общий guard/commit/push). База по умолчанию —
+# merge-base(снапшот, BASE_BRANCH): у ветки, начатой через pbx start от
+# corp-<BASE>, это ровно корп-коммит старта.
+deliver_apply_patch() {
+  local branch="$1" from="$2" base="$3"
+  c_blue "🔵 Забираю '$from' из зеркала (патч-режим)"
+  if ! GIT_TERMINAL_PROMPT=0 timeout 60 git fetch -q "$MIRROR" "$from" 2>/dev/null; then
+    die "Не удалось получить '$from' из зеркала ($MIRROR). Проверь имя ветки (дома: pbx push <проект> <ветка>) и доступ."
+  fi
+  local snap; snap="$(git rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+  _pbx_is_sha "$snap" || die "FETCH_HEAD после fetch '$from' пуст"
+
+  if [[ -n "$base" ]]; then
+    local base_arg="$base"
+    base="$(git rev-parse -q --verify "$base^{commit}" 2>/dev/null || true)"
+    _pbx_is_sha "$base" || die "--base не найден в репо (ни в корпе, ни в ветке зеркала): $base_arg"
+  else
+    base="$(git merge-base "$snap" HEAD 2>/dev/null || true)"
+    _pbx_is_sha "$base" || die "У ветки зеркала '$from' нет общей истории с $BASE_BRANCH — ветка начата не от корпа. Начинай задачи дома через pbx start, или укажи базу: --base <sha, от которого считать наш дифф>."
+  fi
+  ui_kv FROM "$from (${snap:0:7})"
+  ui_kv BASE "${base:0:7}"
+  c_blue "🔵 Патч: ${base:0:7} → ${snap:0:7} поверх $BASE_BRANCH"
+
+  local patch; patch="$(mktemp -t pbx-patch.XXXXXX)"
+  if ! git diff --binary "$base" "$snap" > "$patch"; then
+    rm -f "$patch"; die "git diff база→снапшот не удался"
+  fi
+  if [[ ! -s "$patch" ]]; then
+    rm -f "$patch"
+    PATCH_EMPTY=1
+    return 0
+  fi
+  if ! git checkout -q -b "$branch"; then
+    rm -f "$patch"
+    die "Не удалось создать ветку '$branch' (уже есть на ноуте? после мержа имя не освобождается — возьми новое)"
+  fi
+  local out
+  if ! out="$(git apply --index "$patch" 2>&1)"; then
+    rm -f "$patch"
+    git checkout -q -f "$BASE_BRANCH" && git branch -q -D "$branch"
+    printf '%s\n' "$out" >&2
+    die "Патч не лёг на свежий $BASE_BRANCH (см. выше) — в корпе эти места уже менялись. Ничего не закоммичено, ветка удалена. Дома: pbx start от свежего корпа и перенеси правки, или укажи точную --base."
+  fi
+  rm -f "$patch"
+  return 0
+}
+
 # ---- deliver ---------------------------------------------------------------
 # Распаковать архив в репозиторий, создать ветку от BASE_BRANCH, закоммитить и
 # запушить с созданием MR/PR в TARGET_BRANCH (по умолчанию dev; настраивается).
 cmd_deliver() {
   # --yes / -y (в любой позиции) или PBX_ASSUME_YES=1 — пропустить guard-подтверждение
   local assume_yes="${PBX_ASSUME_YES:-0}"
-  local from_mirror=0
-  local _a _args=()
+  local from_mirror=0 patch_mode=0 patch_from="" patch_base=""
+  local _a _args=() _want=""
   for _a in "$@"; do
+    if [[ -n "$_want" ]]; then
+      printf -v "$_want" '%s' "$(strip_cr "$_a")"; _want=""; continue
+    fi
     case "$_a" in
       --yes|-y) assume_yes=1 ;;
       --mirror) from_mirror=1 ;;
+      --patch)  patch_mode=1 ;;
+      --from)   _want=patch_from ;;
+      --base)   _want=patch_base ;;
+      --from=*) patch_from="$(strip_cr "${_a#--from=}")" ;;
+      --base=*) patch_base="$(strip_cr "${_a#--base=}")" ;;
       *)        _args+=("$_a") ;;
     esac
   done
+  [[ -z "$_want" ]] || die "После --${_want#patch_} нужно значение"
   set -- ${_args[@]+"${_args[@]}"}
+  if [[ -n "$patch_from$patch_base" && "$patch_mode" != 1 ]]; then
+    die "--from/--base работают только вместе с --patch"
+  fi
+  if (( patch_mode && from_mirror )); then
+    die "--patch и --mirror взаимоисключающие: --patch сам берёт ветку из зеркала"
+  fi
 
   local project branch msg archive
-  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]}")"
+  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка зеркала>] [--base <sha>]]}")"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
   archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
@@ -1663,8 +1811,8 @@ cmd_deliver() {
   PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
   local repo="$REPO"
 
-  if [[ "$from_mirror" == 1 ]]; then
-    [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' (нужен для --mirror). Добавь MIRROR=... в $PBX_REGISTRY_DIR/$project.conf"
+  if [[ "$from_mirror" == 1 || "$patch_mode" == 1 ]]; then
+    [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' (нужен для --mirror/--patch). Добавь MIRROR=... в $PBX_REGISTRY_DIR/$project.conf"
   else
     [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
   fi
@@ -1681,43 +1829,52 @@ cmd_deliver() {
   git checkout "$BASE_BRANCH"
   git pull origin "$BASE_BRANCH"
 
-  # Распаковка во временную папку
-  local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  if [[ "$from_mirror" == 1 ]]; then
-    # Источник — ветка зеркала (Э2, вариант В): наполняем ту же tmp-директорию,
-    # что раньше наполнял архив; дальше НЕТРОНУТЫЙ rsync/guard-путь.
-    c_blue "🔵 Забираю '$branch' из зеркала"
-    if ! GIT_TERMINAL_PROMPT=0 timeout 30 git fetch -q "$MIRROR" "$branch" 2>/dev/null; then
-      die "Не удалось получить '$branch' из зеркала ($MIRROR). Проверь PAT/ключ и срок действия, либо используй архивный путь."
+  PATCH_EMPTY=0
+  if [[ "$patch_mode" == 1 ]]; then
+    deliver_apply_patch "$branch" "${patch_from:-$branch}" "$patch_base"
+    if [[ "$PATCH_EMPTY" == 1 ]]; then
+      c_warn "Изменений нет: снапшот в зеркале совпадает с базой — выходим."
+      return 0
     fi
-    git archive FETCH_HEAD | tar -x -C "$tmp" \
-      || die "Не удалось развернуть снапшот из FETCH_HEAD"
   else
-    case "$archive" in
-      *.zip)          unzip -q "$archive" -d "$tmp" ;;
-      *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
-      *.tar)          tar -xf "$archive" -C "$tmp" ;;
-      *) die "Неизвестный формат архива: $archive" ;;
-    esac
-  fi
-  # Если внутри единственный корневой каталог — заходим в него
-  local inner="$tmp"
-  if [[ $(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 \
-     && $(find "$tmp" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]; then
-    inner="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d)"
-  fi
+    # Распаковка во временную папку
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    if [[ "$from_mirror" == 1 ]]; then
+      # Источник — ветка зеркала (Э2, вариант В): наполняем ту же tmp-директорию,
+      # что раньше наполнял архив; дальше НЕТРОНУТЫЙ rsync/guard-путь.
+      c_blue "🔵 Забираю '$branch' из зеркала"
+      if ! GIT_TERMINAL_PROMPT=0 timeout 30 git fetch -q "$MIRROR" "$branch" 2>/dev/null; then
+        die "Не удалось получить '$branch' из зеркала ($MIRROR). Проверь PAT/ключ и срок действия, либо используй архивный путь."
+      fi
+      git archive FETCH_HEAD | tar -x -C "$tmp" \
+        || die "Не удалось развернуть снапшот из FETCH_HEAD"
+    else
+      case "$archive" in
+        *.zip)          unzip -q "$archive" -d "$tmp" ;;
+        *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
+        *.tar)          tar -xf "$archive" -C "$tmp" ;;
+        *) die "Неизвестный формат архива: $archive" ;;
+      esac
+    fi
+    # Если внутри единственный корневой каталог — заходим в него
+    local inner="$tmp"
+    if [[ $(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 \
+       && $(find "$tmp" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]; then
+      inner="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d)"
+    fi
 
-  # Полная синхронизация (сохраняем служебные файлы репозитория)
-  ui_section "Синхронизирую файлы в $repo"
-  local syncex; mapfile -t syncex < <(sync_exclude_args)
-  rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
-  rm -rf "$tmp"        # tmp больше не нужен после синка
-  trap - RETURN        # tmp уже удалён — снять RETURN-trap, чтобы он не сработал на возврате функции
+    # Полная синхронизация (сохраняем служебные файлы репозитория)
+    ui_section "Синхронизирую файлы в $repo"
+    local syncex; mapfile -t syncex < <(sync_exclude_args)
+    rsync -a --delete "${syncex[@]}" "$inner"/ "$repo"/
+    rm -rf "$tmp"        # tmp больше не нужен после синка
+    trap - RETURN        # tmp уже удалён — снять RETURN-trap, чтобы он не сработал на возврате функции
 
-  # Ветка от BASE_BRANCH → коммит → пуш с MR/PR в TARGET_BRANCH
-  git checkout -b "$branch"
-  git add -A
+    # Ветка от BASE_BRANCH → коммит → пуш с MR/PR в TARGET_BRANCH
+    git checkout -b "$branch"
+    git add -A
+  fi
   if git diff --cached --quiet; then
     c_warn "Изменений нет — выходим."
     git checkout "$BASE_BRANCH"
@@ -2098,10 +2255,15 @@ pbx — доставка проектов Pybotx (WSL)
   pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
+                                                + корп-BASE_BRANCH → ветка corp-<BASE_BRANCH> зеркала (CORP_SYNC=0 в conf — выключить)
+  pbx start   <проект> <ветка>                  ДОМ: новая задача — ветка в SRC от corp-<BASE_BRANCH> зеркала (свежий корп)
   pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
   pbx ctx     [проект] [--json]                 ДОМ: вердикт готовности к доставке (сравнение дом↔корп по снимку); --json — для ИИ
-  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
+  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка зеркала>] [--base <sha>]]
                                                 распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
+                                                --patch: вместо rsync --delete накладывает ТОЛЬКО наш дифф (база → ветка зеркала
+                                                --from, по умолчанию = <ветка>) поверх свежего BASE_BRANCH; база — общий предок с
+                                                корпом (ветки от pbx start) или --base
                                                 перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
   pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
                                                 (config/repo/archive/env; pbx также сам пишет её в этот файл при любой ошибке)
@@ -2117,6 +2279,8 @@ pbx — доставка проектов Pybotx (WSL)
 Примеры:
   pbx pack <проект>
   pbx deliver <проект> feature/SUBA-2147-fix-name "Описание изменений"
+  pbx start <проект> fix/name                 # дом: задача от свежего корпа
+  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание" --patch --from fix/name
   pbx log <проект>            # собрать диагностику после ошибки
   pbx add sup /home/me/sup
 
@@ -2149,11 +2313,13 @@ ${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
 ${C_BOLD}Команды${C_RESET}
   ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
   ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
-  ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → ветка pbx/state зеркала${C_RESET}
+  ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → pbx/state + корп-dev → corp-dev зеркала${C_RESET}
+  ${C_CYAN}pbx start${C_RESET}   <проект> <ветка>        ${C_DIM}дом: новая задача — ветка от corp-dev зеркала${C_RESET}
   ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
   ${C_CYAN}pbx ctx${C_RESET}     [проект] [--json]       ${C_DIM}дом: вердикт готовности к доставке (ok/warn/danger)${C_RESET}
-  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror]
+  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка>] [--base <sha>]]
                                           ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
+                                          ${C_DIM}--patch — только наш дифф из ветки зеркала поверх свежего dev (без rsync --delete)${C_RESET}
                                           ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
   ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
   ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
@@ -2166,6 +2332,8 @@ ${C_BOLD}Команды${C_RESET}
 ${C_BOLD}Примеры${C_RESET}
   pbx pack sup
   pbx deliver sup feature/SUBA-2147-fix-name "Описание изменений"
+  pbx start sup fix/name ${C_DIM}# дом: задача от свежего корпа${C_RESET}
+  pbx deliver sup feature/SUBA-2147-fix-name "Описание" --patch --from fix/name
   pbx log sup
 
 ${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
@@ -2479,6 +2647,7 @@ main() {
   case "$cmd" in
     pack)               require_wsl; cmd_pack "$@" ;;
     push)               require_wsl; cmd_push "$@" ;;
+    start)              require_wsl; cmd_start "$@" ;;
     snapshot)           cmd_snapshot "$@" ;;
     corp)               cmd_corp "$@" ;;
     ctx)                cmd_ctx "$@" ;;
