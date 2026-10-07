@@ -2188,6 +2188,10 @@ _mk_snap_fixture() {
 
 test_snapshot_creates_state_no_leak() {
   _mk_snap_fixture
+  # Инвариант Э3 «корп-объектов в зеркале нет» — для режима без корп-синка.
+  # С CORP_SYNC=1 (Э5) корп-dev уходит в corp-dev осознанно; что pbx/state
+  # при этом сам корп-историю не тянет — test_e5_snapshot_state_stays_orphan.
+  echo 'CORP_SYNC=0' >> "$SN_REG/proj.conf"
   local ws; ws="$(make_ws)"; WORKSPACE="$ws"
   local st_before idx_before
   st_before="$(git -C "$CE_REPO" status --porcelain)"
@@ -2495,6 +2499,200 @@ test_menu_corp_returns_to_menu() {
 }
 
 test_source_no_run
+# --- Э5: corp-sync в snapshot, pbx start, deliver --patch ----------------------
+# Фикстура: корп (bare) с dev; ноутовский REPO-клон; зеркало (bare); SRC дома.
+_mk_e5_fixture() {
+  E5_BASE="$(make_ws)"
+  E5_CORP="$E5_BASE/corp.git"; E5_MIRROR="$E5_BASE/mirror.git"
+  E5_REPO="$E5_BASE/repo"; E5_SRC="$E5_BASE/src"
+  E5_REG="$(make_ws)"; PBX_REGISTRY_DIR="$E5_REG"
+  DIST_DIR="$E5_BASE/_dist"; mkdir -p "$DIST_DIR"
+  git init -q --bare "$E5_CORP"; git init -q --bare "$E5_MIRROR"
+  git init -q "$E5_REPO"
+  ( cd "$E5_REPO" && git config user.email t@t && git config user.name t \
+    && git remote add origin "$E5_CORP" && git checkout -q -b dev \
+    && echo keep > file.txt && echo role > roles.txt && echo ci > .gitlab-ci.yml \
+    && git add -A && git commit -qm init && git push -qu origin dev ) >/dev/null 2>&1
+  printf 'SRC=%s\nREPO=%s\nMIRROR=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' \
+    "$E5_SRC" "$E5_REPO" "$E5_MIRROR" > "$E5_REG/proj.conf"
+}
+_e5_cleanup() { cd "$HERE"; rm -rf "$E5_BASE" "$E5_REG"; }
+# коммит «коллеги» прямо в корп-dev (через временный клон)
+_e5_corp_commit() {
+  local tmp; tmp="$(mktemp -d)"
+  ( git clone -q -b dev "$E5_CORP" "$tmp/c" && cd "$tmp/c" && git config user.email c@c \
+    && git config user.name c && eval "$1" && git add -A && git commit -qm colleague \
+    && git push -q origin dev ) >/dev/null 2>&1
+  rm -rf "$tmp"
+}
+# дом: SRC-клон зеркала + pbx start
+_e5_home_start() {
+  git init -q "$E5_SRC"
+  ( cd "$E5_SRC" && git config user.email h@h && git config user.name h ) >/dev/null 2>&1
+  ( cmd_start proj "$1" ) >/dev/null 2>&1
+}
+
+test_e5_snapshot_corp_sync() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  assert_eq "corp-sync: corp-dev в зеркале = корп-dev" \
+    "$(git -C "$E5_MIRROR" rev-parse -q --verify refs/heads/corp-dev)" \
+    "$(git -C "$E5_CORP" rev-parse dev)"
+  _e5_corp_commit 'echo x > other.txt'
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  assert_eq "corp-sync: повторный snapshot двигает corp-dev" \
+    "$(git -C "$E5_MIRROR" rev-parse -q --verify refs/heads/corp-dev)" \
+    "$(git -C "$E5_CORP" rev-parse dev)"
+  _e5_cleanup
+}
+
+test_e5_snapshot_state_stays_orphan() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  local corp_head; corp_head="$(git -C "$E5_CORP" rev-parse dev)"
+  if git -C "$E5_MIRROR" merge-base --is-ancestor "$corp_head" pbx/state 2>/dev/null; then
+    bad "corp-sync: pbx/state ПОТЯНУЛ корп-историю"
+  else
+    ok "corp-sync: pbx/state по-прежнему без корп-родителей"
+  fi
+  assert_eq "corp-sync: у state-коммита нет родителей (первый снимок)" \
+    "$(git -C "$E5_MIRROR" rev-list --count pbx/state)" "1"
+  _e5_cleanup
+}
+
+test_e5_snapshot_corp_sync_optout() {
+  _mk_e5_fixture
+  echo 'CORP_SYNC=0' >> "$E5_REG/proj.conf"
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  assert_eq "corp-sync: CORP_SYNC=0 — corp-dev НЕ выкладывается" \
+    "$(git -C "$E5_MIRROR" rev-parse -q --verify refs/heads/corp-dev)" ""
+  assert_has "corp-sync: CORP_SYNC=0 — снимок pbx/state всё равно есть" \
+    "$(git -C "$E5_MIRROR" branch --list 'pbx/state')" "pbx/state"
+  _e5_cleanup
+}
+
+test_e5_start_from_corp() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start fix/x
+  assert_eq "start: ветка создана и текущая" "$(git -C "$E5_SRC" branch --show-current)" "fix/x"
+  assert_eq "start: ветка = корп-dev по SHA" \
+    "$(git -C "$E5_SRC" rev-parse HEAD)" "$(git -C "$E5_CORP" rev-parse dev)"
+  local rc=0
+  ( cmd_start proj fix/x ) >/dev/null 2>&1 || rc=$?
+  assert_eq "start: существующая ветка → die" "$rc" "1"
+  echo dirty >> "$E5_SRC/file.txt"
+  rc=0; ( cmd_start proj fix/y ) >/dev/null 2>&1 || rc=$?
+  assert_eq "start: грязное дерево → die" "$rc" "1"
+  assert_eq "start: при отказе ветка не создана" "$(git -C "$E5_SRC" branch --list fix/y)" ""
+  _e5_cleanup
+}
+
+test_e5_start_without_corp_branch_dies() {
+  _mk_e5_fixture
+  git init -q "$E5_SRC"
+  local rc=0 out
+  out="$( ( cmd_start proj fix/x ) 2>&1 )" || rc=$?
+  assert_eq "start: нет corp-dev в зеркале → die" "$rc" "1"
+  assert_has "start: подсказка про pbx snapshot" "$out" "pbx snapshot"
+  _e5_cleanup
+}
+
+test_e5_deliver_patch_e2e() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start fix/x
+  ( cd "$E5_SRC" && echo changed > file.txt && echo fresh > new.txt \
+    && git add -A && git commit -qm work && echo more >> new.txt ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/x proj ) >/dev/null 2>&1
+  # пока работали дома — в корп влили чужое и DevOps поменял CI
+  _e5_corp_commit 'echo theirs > other.txt && echo ci2 > .gitlab-ci.yml'
+  ( cd "$E5_REPO" && cmd_deliver proj "feature/X-1" "патч-доставка" --patch --from fix/x --yes </dev/null ) >/dev/null 2>&1
+  assert_eq  "patch: ветка доставки текущая" "$(git -C "$E5_REPO" branch --show-current)" "feature/X-1"
+  assert_eq  "patch: наша правка доехала" "$(cat "$E5_REPO/file.txt")" "changed"
+  assert_has "patch: новый файл с незакоммиченным" "$(cat "$E5_REPO/new.txt")" "more"
+  assert_eq  "patch: чужая влитая работа цела" "$(cat "$E5_REPO/other.txt" 2>/dev/null)" "theirs"
+  assert_eq  "patch: CI DevOps не откатился" "$(cat "$E5_REPO/.gitlab-ci.yml")" "ci2"
+  assert_eq  "patch: файл, которого дома не трогали, не удалён" "$(cat "$E5_REPO/roles.txt" 2>/dev/null)" "role"
+  assert_eq  "patch: родитель коммита = свежий корп-dev" \
+    "$(git -C "$E5_REPO" rev-parse HEAD^)" "$(git -C "$E5_CORP" rev-parse dev)"
+  assert_eq  "patch: в коммите ровно наши 2 файла" \
+    "$(git -C "$E5_REPO" diff --name-only HEAD^ HEAD | sort | tr '\n' ' ')" "file.txt new.txt "
+  assert_has "patch: ветка запушена в корп" "$(git -C "$E5_CORP" branch --list 'feature/X-1')" "feature/X-1"
+  assert_eq  "patch: домашние коммиты в корп не ушли (родитель — корп)" \
+    "$(git -C "$E5_CORP" rev-list --count feature/X-1)" "3"
+  _e5_cleanup
+}
+
+test_e5_deliver_patch_from_defaults_to_branch() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start feature/X-2
+  ( cd "$E5_SRC" && echo v2 > file.txt && git commit -qam w ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" feature/X-2 proj ) >/dev/null 2>&1
+  ( cd "$E5_REPO" && cmd_deliver proj "feature/X-2" "msg" --patch --yes </dev/null ) >/dev/null 2>&1
+  assert_eq "patch: без --from берётся ветка с именем доставки" "$(cat "$E5_REPO/file.txt")" "v2"
+  _e5_cleanup
+}
+
+test_e5_deliver_patch_conflict_rolls_back() {
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start fix/x
+  ( cd "$E5_SRC" && echo mine > file.txt && git commit -qam w ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/x proj ) >/dev/null 2>&1
+  _e5_corp_commit 'echo theirs > file.txt'
+  local rc=0 out
+  out="$( ( cd "$E5_REPO" && cmd_deliver proj "feature/X-3" "msg" --patch --from fix/x --yes </dev/null ) 2>&1 )" || rc=$?
+  assert_eq  "patch-конфликт: rc=1" "$rc" "1"
+  assert_has "patch-конфликт: понятная причина" "$out" "Патч не лёг"
+  assert_eq  "patch-конфликт: ветка удалена" "$(git -C "$E5_REPO" branch --list 'feature/X-3')" ""
+  assert_eq  "patch-конфликт: остались на dev" "$(git -C "$E5_REPO" branch --show-current)" "dev"
+  assert_eq  "patch-конфликт: дерево чистое" "$(git -C "$E5_REPO" status --porcelain)" ""
+  assert_eq  "patch-конфликт: ничего не запушено" "$(git -C "$E5_CORP" branch --list 'feature/X-3')" ""
+  _e5_cleanup
+}
+
+test_e5_deliver_patch_unrelated_needs_base() {
+  _mk_e5_fixture
+  # дом без pbx start: своя история с тем же деревом, что у корпа на старте
+  mkdir -p "$E5_SRC"
+  ( cd "$E5_SRC" && git init -q . && git config user.email h@h && git config user.name h \
+    && echo keep > file.txt && echo role > roles.txt && echo ci > .gitlab-ci.yml \
+    && git add -A && git commit -qm home-base && echo upd > file.txt && git commit -qam work ) >/dev/null 2>&1
+  local home_base; home_base="$(git -C "$E5_SRC" rev-parse HEAD^)"
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/u proj ) >/dev/null 2>&1
+  local rc=0 out
+  out="$( ( cd "$E5_REPO" && cmd_deliver proj "feature/U-1" "msg" --patch --from fix/u --yes </dev/null ) 2>&1 )" || rc=$?
+  assert_eq  "patch: несвязанная история без --base → die" "$rc" "1"
+  assert_has "patch: подсказка про --base" "$out" "--base"
+  ( cd "$E5_REPO" && cmd_deliver proj "feature/U-1" "msg" --patch --from fix/u --base "$home_base" --yes </dev/null ) >/dev/null 2>&1
+  assert_eq  "patch: с --base дифф лёг" "$(cat "$E5_REPO/file.txt")" "upd"
+  assert_eq  "patch: с --base лишнего нет" \
+    "$(git -C "$E5_REPO" diff --name-only HEAD^ HEAD)" "file.txt"
+  _e5_cleanup
+}
+
+test_e5_deliver_patch_flag_validation() {
+  _mk_e5_fixture
+  local rc=0
+  ( cmd_deliver proj feature/F-1 msg --from fix/x --yes </dev/null ) >/dev/null 2>&1 || rc=$?
+  assert_eq "flags: --from без --patch → die" "$rc" "1"
+  rc=0; ( cmd_deliver proj feature/F-1 msg --patch --mirror --yes </dev/null ) >/dev/null 2>&1 || rc=$?
+  assert_eq "flags: --patch вместе с --mirror → die" "$rc" "1"
+  rc=0; ( cmd_deliver proj feature/F-1 msg --patch --base </dev/null ) >/dev/null 2>&1 || rc=$?
+  assert_eq "flags: --base без значения → die" "$rc" "1"
+  assert_eq "flags: при отказе по флагам ветка не создана" "$(git -C "$E5_REPO" branch --list 'feature/F-1')" ""
+  _e5_cleanup
+}
+
+test_e5_help_mentions() {
+  local out; out="$(PBX_NO_MENU=1 bash "$PBX" help 2>&1)"
+  assert_has "help: pbx start" "$out" "pbx start"
+  assert_has "help: --patch" "$out" "--patch"
+  assert_has "help: CORP_SYNC" "$out" "CORP_SYNC"
+}
+
 test_color_gated_in_pipe
 test_ui_flags_nontty
 test_glyphs_ascii_fallback
@@ -2658,6 +2856,17 @@ test_cmd_ctx_json_unknown_corp_null
 test_cmd_ctx_json_nasty_subjects
 test_cmd_ctx_json_corrupted_meta_numbers
 
+test_e5_snapshot_corp_sync
+test_e5_snapshot_state_stays_orphan
+test_e5_snapshot_corp_sync_optout
+test_e5_start_from_corp
+test_e5_start_without_corp_branch_dies
+test_e5_deliver_patch_e2e
+test_e5_deliver_patch_from_defaults_to_branch
+test_e5_deliver_patch_conflict_rolls_back
+test_e5_deliver_patch_unrelated_needs_base
+test_e5_deliver_patch_flag_validation
+test_e5_help_mentions
 test_selfupdate_no_mirror_dies
 test_selfupdate_first_install_and_rev
 test_selfupdate_idempotent
