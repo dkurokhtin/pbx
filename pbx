@@ -1375,6 +1375,22 @@ _ctx_reason() {
 # rc: 0 — state-файлы в каталоге валидны; 2 — снимка нет; 3 — зеркало
 # недоступно; 4 — нет MIRROR. Требует ST_* (status_collect) при rc=0.
 # Вердикт при сомнении — в сторону строгости (fail-closed).
+# ctx_home_has_work — есть ли дома что доставлять: рабочее дерево SRC
+# (отслеживаемые файлы, вкл. незакоммиченное) отличается от корп-tip снимка.
+# Исключения — как у pbx push (CLAUDE.md, .env и т.п. в зеркало не едут).
+# Нет tip или его объекта дома — считаем, что работа есть (строгая сторона).
+ctx_home_has_work() {
+  [[ -n "$CTX_BASE_SHA" ]] || return 0
+  git -C "$ST_SRC" cat-file -e "$CTX_BASE_SHA^{commit}" 2>/dev/null || return 0
+  local -a specs=(".")
+  local ps
+  while IFS= read -r ps; do specs+=("$ps"); done < <(pack_exclude_pathspecs)
+  if git -C "$ST_SRC" diff --quiet "$CTX_BASE_SHA" -- "${specs[@]}" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
 ctx_compare() {
   local d="$1" rc="$2"
   CTX_VERDICT='ok'; CTX_BEHIND_N=-1; CTX_REASONS=''
@@ -1468,16 +1484,18 @@ ctx_compare() {
   fi
 
   # --- гигиена транспорта дома --------------------------------------------------
-  if [[ -n "$ST_PUSH_COMMIT" && -n "$ST_PUSH_SOURCE" ]]; then
+  # Доставка идёт через зеркало (push → deliver --patch), архив в ней не
+  # участвует: «архив протух» в ctx больше не показываем (Э6; свежесть архива
+  # видна в pbx status). «Push отстаёт» — только когда дома ЕСТЬ что доставлять:
+  # дерево SRC отличается от корп-tip (с теми же исключениями, что у pbx push).
+  # Дом, равный корпу, не требует push — предупреждение было бы шумом.
+  if [[ -n "$ST_PUSH_COMMIT" && -n "$ST_PUSH_SOURCE" ]] && ctx_home_has_work; then
     local head_now
     head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
     if [[ -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]]; then
       _ctx_reason push_stale warn \
         'push-снапшот в зеркале отстаёт от SRC — сделай pbx push перед доставкой'
     fi
-  fi
-  if [[ "$ST_ARCHIVE_EXISTS" == true && "$ST_STALE" == true ]]; then
-    _ctx_reason pack_stale warn 'архив протух — сделай pbx pack перед доставкой'
   fi
 
   # --- информация (вердикт не меняет) -------------------------------------------
