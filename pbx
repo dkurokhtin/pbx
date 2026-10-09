@@ -1860,8 +1860,13 @@ deliver_apply_patch() {
   ui_kv BASE "${base:0:7}"
   c_blue "🔵 Патч: ${base:0:7} → ${snap:0:7} поверх $BASE_BRANCH"
 
+  # Контекст агента pbx push в зеркало не везёт, поэтому в снапшоте его нет.
+  # Без исключения патч удалил бы закоммиченный в корпе CLAUDE.md/.claude.
   local patch; patch="$(mktemp -t pbx-patch.XXXXXX)"
-  if ! git diff --binary "$base" "$snap" > "$patch"; then
+  if ! git diff --binary "$base" "$snap" -- . \
+      ':(exclude)CLAUDE.md' ':(exclude,glob)**/CLAUDE.md' \
+      ':(exclude).claude' ':(exclude,glob)**/.claude/**' \
+      ':(exclude).pbx.conf' > "$patch"; then
     rm -f "$patch"; die "git diff база→снапшот не удался"
   fi
   if [[ ! -s "$patch" ]]; then
