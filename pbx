@@ -62,6 +62,7 @@ load_config() {
   EXTRA_PACK_EXCLUDES=(); EXTRA_SYNC_EXCLUDES=()
   SRC=""; REPO=""; MIRROR=""
   CORP_SYNC=1   # snapshot выкладывает корп-BASE_BRANCH в зеркало (corp-<BASE_BRANCH>)
+  AGENT_FILES=0 # 1 — CLAUDE.md и .claude/ едут в репо (боты Клаудс); 0 — нет (СУБА, ИБ)
   # 2) глобальный конфиг
   [[ -f "$WORKSPACE/.pbx.conf" ]] && source "$WORKSPACE/.pbx.conf"
   # 3) реестр проекта (центральный)
@@ -81,7 +82,7 @@ load_config() {
   REPO="${REPO:-$PROJECTS_ROOT/$project}"
   # 7) защита от CRLF (конфиги на /mnt/c часто с \r), включая SRC/REPO
   local __v __i
-  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO MIRROR CORP_SYNC; do
+  for __v in BASE_BRANCH TARGET_BRANCH FORGE SRC REPO MIRROR CORP_SYNC AGENT_FILES; do
     printf -v "$__v" '%s' "${!__v//$'\r'/}"
   done
   for __i in "${!EXTRA_PACK_EXCLUDES[@]}"; do EXTRA_PACK_EXCLUDES[$__i]="${EXTRA_PACK_EXCLUDES[$__i]//$'\r'/}"; done
@@ -217,11 +218,23 @@ cmd_list() {
 }
 
 # ---- exclude builders (pack/deliver) ---------------------------------------
+# Контекст агента. По умолчанию CLAUDE.md и .claude/ в репо не едут — так
+# требуют СУБА-репы (ИБ). AGENT_FILES=1 в реестре проекта (боты Клаудс) — едут,
+# кроме личного: локальных разрешений и worktree агента.
+agent_exclude_names() {
+  if [[ "${AGENT_FILES:-0}" == 1 ]]; then
+    printf '%s\n' .claude/settings.local.json .claude/worktrees
+  else
+    printf '%s\n' .claude CLAUDE.md
+  fi
+}
+
 # Аргументы --exclude для tar. GNU tar не якорит паттерны → имя без пути
 # исключает совпадения на любой глубине (node_modules в sup-frontend/ и т.п.).
 pack_exclude_args() {
   local e
-  local base=( node_modules .git .venv __pycache__ .claude CLAUDE.md .pbx.conf )
+  local base=( node_modules .git .venv __pycache__ .pbx.conf )
+  mapfile -t -O "${#base[@]}" base < <(agent_exclude_names)
   for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$e"; done
   printf -- '--exclude=%s\n' '*.pyc'
   for e in "${EXTRA_PACK_EXCLUDES[@]:-}"; do
@@ -233,7 +246,13 @@ pack_exclude_args() {
 # Аргументы --exclude для rsync (относительно корня переноса).
 sync_exclude_args() {
   local e
-  local base=( ".git/" ".gitlab-ci.yml" "CLAUDE.md" ".claude/" ".pbx.conf" )
+  local base=( ".git/" ".gitlab-ci.yml" ".pbx.conf" )
+  # те же имена, что agent_exclude_names, но каталоги для rsync — со слешем
+  if [[ "${AGENT_FILES:-0}" == 1 ]]; then
+    base+=( ".claude/settings.local.json" ".claude/worktrees/" )
+  else
+    base+=( "CLAUDE.md" ".claude/" )
+  fi
   for e in "${base[@]}"; do printf -- '--exclude=%s\n' "$e"; done
   for e in "${EXTRA_SYNC_EXCLUDES[@]:-}"; do
     [[ -n "$e" ]] && printf -- '--exclude=%s\n' "$e"
@@ -1860,12 +1879,15 @@ deliver_apply_patch() {
   ui_kv BASE "${base:0:7}"
   c_blue "🔵 Патч: ${base:0:7} → ${snap:0:7} поверх $BASE_BRANCH"
 
-  # Контекст агента pbx push в зеркало не везёт, поэтому в снапшоте его нет.
-  # Без исключения патч удалил бы закоммиченный в корпе CLAUDE.md/.claude.
+  # Исключённое pbx push в зеркало не везёт, поэтому в снапшоте его нет.
+  # Без исключения патч удалил бы закоммиченный в корпе CLAUDE.md/.claude
+  # (при AGENT_FILES=1 исключаются только личные файлы агента).
   local patch; patch="$(mktemp -t pbx-patch.XXXXXX)"
-  if ! git diff --binary "$base" "$snap" -- . \
-      ':(exclude)CLAUDE.md' ':(exclude,glob)**/CLAUDE.md' \
-      ':(exclude).claude' ':(exclude,glob)**/.claude/**' \
+  local -a agent_specs=() a
+  while IFS= read -r a; do
+    agent_specs+=(":(exclude)$a" ":(exclude,glob)**/$a" ":(exclude,glob)**/$a/**")
+  done < <(agent_exclude_names)
+  if ! git diff --binary "$base" "$snap" -- . "${agent_specs[@]}" \
       ':(exclude).pbx.conf' > "$patch"; then
     rm -f "$patch"; die "git diff база→снапшот не удался"
   fi
@@ -2441,6 +2463,7 @@ pbx — доставка проектов Pybotx (WSL)
   BASE_BRANCH=dev            от какой ветки ответвляемся
   TARGET_BRANCH=dev          куда MR/PR (master-MR обычно вручную перед релизом)
   FORGE=gitlab               gitlab | github | none
+  AGENT_FILES=0              1 — CLAUDE.md и .claude/ едут в репо (кроме settings.local.json и worktrees)
   EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
   EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка
   Слои: дефолт → $WORKSPACE/.pbx.conf → реестр <имя>.conf → проектный <SRC>/.pbx.conf → env PBX_* (env побеждает).

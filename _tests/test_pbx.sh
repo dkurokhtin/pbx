@@ -855,6 +855,36 @@ test_snapshot_tree_contents() {
   rm -rf "$SN_SRC"
 }
 
+test_snapshot_tree_agent_files() {
+  # AGENT_FILES=1 (боты Клаудс): CLAUDE.md и .claude/ едут, личное — нет
+  _mk_snapshot_fixture
+  echo local > "$SN_SRC/.claude/settings.local.json"
+  mkdir -p "$SN_SRC/.claude/worktrees/w1" && echo wt > "$SN_SRC/.claude/worktrees/w1/f.txt"
+  local tree files
+  tree="$(cd "$SN_SRC" && AGENT_FILES=1 snapshot_tree "$SN_SRC")"
+  files="$(git -C "$SN_SRC" ls-tree -r --name-only "$tree")"
+  assert_has "agent=1: CLAUDE.md в снапшоте"            "$files" "CLAUDE.md"
+  assert_has "agent=1: .claude/cfg в снапшоте"          "$files" ".claude/cfg"
+  assert_no  "agent=1: без settings.local.json"         "$files" "settings.local.json"
+  assert_no  "agent=1: без .claude/worktrees"           "$files" "worktrees"
+  tree="$(cd "$SN_SRC" && AGENT_FILES=0 snapshot_tree "$SN_SRC")"
+  files="$(git -C "$SN_SRC" ls-tree -r --name-only "$tree")"
+  assert_no  "agent=0: без CLAUDE.md"                   "$files" "CLAUDE.md"
+  assert_no  "agent=0: без .claude"                     "$files" ".claude"
+  rm -rf "$SN_SRC"
+}
+
+test_sync_excludes_agent_files() {
+  local out
+  out="$(AGENT_FILES=0 sync_exclude_args)"
+  assert_has "rsync agent=0: CLAUDE.md исключён"  "$out" "--exclude=CLAUDE.md"
+  assert_has "rsync agent=0: .claude/ исключён"   "$out" "--exclude=.claude/"
+  out="$(AGENT_FILES=1 sync_exclude_args)"
+  assert_no  "rsync agent=1: CLAUDE.md не исключён" "$out" "--exclude=CLAUDE.md"
+  assert_has "rsync agent=1: settings.local.json исключён" "$out" "--exclude=.claude/settings.local.json"
+  assert_has "rsync agent=1: worktrees исключены" "$out" "--exclude=.claude/worktrees/"
+}
+
 test_snapshot_tree_src_untouched() {
   _mk_snapshot_fixture
   local head0 status0 index_before
@@ -2918,6 +2948,8 @@ test_pack_exclude_pathspecs_extra
 test_pbx_is_sha
 test_load_config_mirror
 test_snapshot_tree_contents
+test_snapshot_tree_agent_files
+test_sync_excludes_agent_files
 test_snapshot_tree_src_untouched
 test_snapshot_tree_orphan_src
 test_snapshot_tree_tracked_excluded_dropped
