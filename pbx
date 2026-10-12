@@ -2705,6 +2705,19 @@ menu_pause() {
 
 # menu_project_flow <pack|push|deliver|log>: выбор проекта → параметры → вызов cmd_*.
 # rc=0 — команда выполнена, выйти из меню; rc=1 — вернуться в меню.
+# menu_read_line <промпт> <заготовка> <переменная> — строка ввода для меню:
+# в TTY с редактируемой заготовкой (read -e -i), в пайпе — простой read.
+menu_read_line() {
+  local __prompt="$1" __init="$2" __val=''
+  if [[ -t 0 ]]; then
+    read -e -r -i "$__init" -p "$__prompt" __val || return 1
+  else
+    printf '%s' "$__prompt" >&2
+    IFS= read -r __val || return 1
+  fi
+  printf -v "$3" '%s' "$(strip_cr "$__val")"
+}
+
 menu_project_flow() {
   local action="$1" idx project branch msg
   local -a projects=()
@@ -2744,14 +2757,18 @@ menu_project_flow() {
       menu_pause
       return 1
       ;;
-    deliver)
-      if [[ -t 0 ]]; then
-        read -e -r -i "feature/" -p "Ветка: " branch || return 1
-      else
-        printf 'Ветка: ' >&2
-        IFS= read -r branch || return 1
+    start)
+      menu_read_line "Новая ветка в SRC: " "fix/" branch || return 1
+      if [[ -z "$branch" || "$branch" == "fix/" ]]; then
+        c_warn "(ветка не задана — отмена)"
+        return 1
       fi
-      branch="$(strip_cr "$branch")"
+      ui_dim "→ pbx start $project $branch"
+      cmd_start "$project" "$branch"
+      return 0
+      ;;
+    deliver|patch)
+      menu_read_line "Ветка: " "feature/" branch || return 1
       if [[ -z "$branch" || "$branch" == "feature/" ]]; then
         c_warn "(ветка не задана — отмена)"
         return 1
@@ -2763,8 +2780,16 @@ menu_project_flow() {
         c_warn "(сообщение пустое — отмена)"
         return 1
       fi
-      ui_dim "→ pbx deliver $project $branch \"$msg\""
-      cmd_deliver "$project" "$branch" "$msg"
+      if [[ "$action" == deliver ]]; then
+        ui_dim "→ pbx deliver $project $branch \"$msg\""
+        cmd_deliver "$project" "$branch" "$msg"
+        return 0
+      fi
+      local from=''
+      menu_read_line "Ветка зеркала (--from, пусто = $branch): " "" from || return 1
+      [[ -n "$from" ]] || from="$branch"
+      ui_dim "→ pbx deliver $project $branch \"$msg\" --patch --from $from"
+      cmd_deliver "$project" "$branch" "$msg" --patch --from "$from"
       return 0
       ;;
   esac
@@ -2777,15 +2802,17 @@ cmd_menu() {
   trap 'ui_raw_off; exit 130' INT TERM
   local idx
   local -a items=(
-    'pack    — упаковать проект в архив'
-    'push    — снапшот рабочего дерева в зеркало'
-    'deliver — доставить архив в репо (ветка + MR)'
-    'snapshot — снимок корп-состояния в зеркало (ноут)'
-    'corp    — корп-состояние проектов (дом)'
+    'snapshot — корп-dev и снимок состояния в зеркало (ноут)'
+    'start   — новая задача от свежего корпа (дом)'
     'ctx     — вердикт дом↔корп: готовность к доставке (дом)'
-    'log     — диагностика проекта'
+    'push    — снапшот рабочего дерева в зеркало (дом)'
+    'deliver — патч из зеркала: ветка + MR (ноут)'
+    'corp    — корп-состояние проектов (дом)'
     'status  — сводка по проектам'
+    'log     — диагностика проекта'
     'list    — список проектов'
+    'pack    — запасной путь: упаковать в архив'
+    'deliver архива — запасной путь (rsync --delete всего снимка)'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
     'self-update — обновить pbx из зеркала (ноут)'
@@ -2795,20 +2822,22 @@ cmd_menu() {
   while :; do
     idx="$(menu_select "pbx — что делаем?" "${items[@]}")" || { printf '\n' >&2; return 0; }
     case "$idx" in
-      0) if menu_project_flow pack;    then return 0; fi ;;
-      1) if menu_project_flow push;    then return 0; fi ;;
-      2) if menu_project_flow deliver; then return 0; fi ;;
-      3) cmd_snapshot || true; return 0 ;;
-      4) cmd_corp || true; menu_pause ;;
-      5) cmd_ctx || true; menu_pause ;;
-      6) menu_project_flow log || true ;;
-      7) cmd_status; menu_pause ;;
+      0) cmd_snapshot || true; return 0 ;;
+      1) if menu_project_flow start;   then return 0; fi ;;
+      2) cmd_ctx || true; menu_pause ;;
+      3) if menu_project_flow push;    then return 0; fi ;;
+      4) if menu_project_flow patch;   then return 0; fi ;;
+      5) cmd_corp || true; menu_pause ;;
+      6) cmd_status; menu_pause ;;
+      7) menu_project_flow log || true ;;
       8) cmd_list; menu_pause ;;
-      9) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      10) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      11) cmd_self_update || true; menu_pause ;;
-      12) cmd_help; menu_pause ;;
-      13) return 0 ;;
+      9) if menu_project_flow pack;    then return 0; fi ;;
+      10) if menu_project_flow deliver; then return 0; fi ;;
+      11) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      12) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      13) cmd_self_update || true; menu_pause ;;
+      14) cmd_help; menu_pause ;;
+      15) return 0 ;;
     esac
   done
 }

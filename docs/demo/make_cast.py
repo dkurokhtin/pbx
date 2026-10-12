@@ -2,7 +2,7 @@
 """Генерация демо-кастов pbx (asciicast v2) ЗАХВАТОМ РЕАЛЬНЫХ СЕССИЙ через pty.
 
 Четыре ролика — по одному на фичу (каждый в свой раздел README):
-  hero    — штатный поток Э5: snapshot (ноут) → start + push (дом) → deliver --patch (ноут)
+  hero    — штатный поток Э5: меню pbx → snapshot (ноут) → start + push (дом) → deliver --patch (ноут)
   status  — сводка: дрейф от pack, зеркало, «SRC ушёл вперёд»
   corp    — Э3: pbx snapshot (ноут) → pbx corp (дом), обе стороны
   guard   — страховка deliver в запасном архивном режиме: удаления чужой работы → отказ
@@ -180,7 +180,7 @@ def make_src_tree(ws, *projects):
 
 def cast_hero():
     """Штатный поток (Э5): snapshot (ноут) → start + push (дом) → deliver --patch (ноут)."""
-    base, hreg, nreg = fresh('flow', 'flow-hreg', 'flow-nreg')
+    base, hreg, nreg, ws = fresh('flow', 'flow-hreg', 'flow-nreg', 'flow-ws')  # ws пустой: в меню/snapshot только sup
     corp = os.path.join(base, 'corp.git')
     mdir = os.path.join(base, 'mirror.git')
     nrepo = os.path.join(base, 'repo')
@@ -198,16 +198,23 @@ def cast_hero():
     git('remote', 'add', 'origin', corp, cwd=nrepo)
     git('push', '-qu', 'origin', 'dev', cwd=nrepo)
     write_conf(nreg, 'sup', REPO=nrepo, MIRROR=mdir, FORGE='none')
-    nenv = env_for(base, nreg)
+    nenv = env_for(ws, nreg)
     # дом: пустой SRC-репо, ветку даст pbx start
     git('init', '-q', hsrc, cwd=ROOT)
     write_conf(hreg, 'sup', SRC=hsrc, MIRROR=mdir)
-    henv = env_for(base, hreg)
+    henv = env_for(ws, hreg)
 
     new_cast()
-    comment('# ноут (видит корп-gitlab): корп-dev → corp-dev зеркала', lead=0.3)
-    type_cmd('pbx snapshot sup', lead=0.6)
-    run_pty(['bash', PBX, 'snapshot', 'sup'], keys=[], env=nenv)
+    comment('# ноут (видит корп-gitlab): меню pbx — пункты в порядке потока', lead=0.3)
+    type_cmd('pbx', lead=0.6)
+    run_pty(['bash', PBX], env=nenv, keys=[
+        (1.4, b'\x1b[B'),  # ↓ start
+        (0.6, b'\x1b[B'),  # ↓ ctx
+        (0.6, b'\x1b[B'),  # ↓ push
+        (0.6, b'\x1b[B'),  # ↓ deliver --patch
+        (1.0, b'\x1b[A'), (0.35, b'\x1b[A'), (0.35, b'\x1b[A'), (0.35, b'\x1b[A'),
+        (0.9, b'\r'),      # Enter → snapshot (корп-dev → corp-dev зеркала)
+    ])
     comment('# дом: задача от свежего корпа')
     type_cmd('pbx start sup fix/widget')
     run_pty(['bash', PBX, 'start', 'sup', 'fix/widget'], keys=[], env=henv)

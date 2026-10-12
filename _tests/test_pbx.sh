@@ -413,17 +413,17 @@ test_menu_gate_no_menu_env() {
   assert_has "гейт: PBX_NO_MENU=1 → help даже при UI_TTY=1" "$out" "pbx — доставка проектов Pybotx"
 }
 test_menu_exit_item() {
-  # UI_TTY=1 + plain-fallback меню: пункт «выход» (14) завершает без действий
+  # UI_TTY=1 + plain-fallback меню: пункт «выход» (16) завершает без действий
   local rc=0
-  ( printf '14\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
-  assert_eq "меню: выбор «выход» (14) → rc=0" "$rc" "0"
+  ( printf '16\n' | { source "$PBX"; UI_TTY=1; TERM=xterm main; } >/dev/null 2>&1 ) || rc=$?
+  assert_eq "меню: выбор «выход» (16) → rc=0" "$rc" "0"
 }
 test_menu_pack_e2e() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj/src"; echo hi > "$ws/proj/src/a.txt"
-  # 1 = pack; затем 1 = первый проект; plain-фолбэк меню читает пайп
-  ( printf '1\n1\n' | {
+  # 10 = pack (запасной путь); затем 1 = первый проект; plain-фолбэк меню читает пайп
+  ( printf '10\n1\n' | {
       source "$PBX"
       WORKSPACE="$ws"; DIST_DIR="$ws/_dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -441,9 +441,9 @@ test_menu_status_returns_to_menu() {
   local ws; ws="$(make_ws)"
   local reg; reg="$(make_ws)"
   mkdir -p "$ws/proj"
-  # 8 = status → вывод → Enter (menu_pause) → 14 = выход
+  # 7 = status → вывод → Enter (menu_pause) → 16 = выход
   local out
-  out="$( ( printf '8\n\n14\n' | {
+  out="$( ( printf '7\n\n16\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -461,8 +461,8 @@ test_menu_push_flow() {
   local reg; reg="$(make_ws)"
   printf 'SRC=%s\nMIRROR=%s\n' "$PU_SRC" "$PU_MIRROR" > "$reg/proj.conf"
   ( cd "$PU_SRC" && git checkout -qb feature/T-77 ) >/dev/null 2>&1
-  # 2 = push → 1 = проект → Enter на ветке (дефолт: текущая ветка SRC)
-  ( printf '2\n1\n\n' | {
+  # 4 = push → 1 = проект → Enter на ветке (дефолт: текущая ветка SRC)
+  ( printf '4\n1\n\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -487,8 +487,8 @@ test_menu_deliver_guard_fail_closed() {
   tar -C "$(dirname "$src")" -czf "$dist/proj.tar.gz" "$(basename "$src")"
   printf 'SRC=%s\nREPO=%s\nBASE_BRANCH=dev\nTARGET_BRANCH=dev\nFORGE=none\n' "$src" "$repo" > "$reg/proj.conf"
   local out rc=0
-  # 3=deliver → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
-  out="$( ( printf '3\n1\nfeature/T-77\nmsg\n' | {
+  # 11=deliver архива → 1=проект → ветка → сообщение; stdin — пайп (plain-fallback), non-TTY guard обязан прервать
+  out="$( ( printf '11\n1\nfeature/T-77\nmsg\n' | {
       source "$PBX"
       WORKSPACE="$base/ws-empty"; mkdir -p "$WORKSPACE"
       DIST_DIR="$dist"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
@@ -1976,11 +1976,13 @@ test_diag_selfrev_line() {
 }
 
 test_menu_has_ctx_and_selfupdate() {
-  # меню: пункт 5 — ctx (после corp), пункт 11 — self-update; выход — последний
+  # меню: штатный поток первым (snapshot/start/ctx/push/deliver), self-update, выход — последний
   local out
-  out="$(printf '14\n' | bash -c 'source "'"$PBX"'"; UI_TTY=1 TERM=xterm cmd_menu' 2>&1 || true)"
+  out="$(printf '16\n' | bash -c 'source "'"$PBX"'"; UI_TTY=1 TERM=xterm cmd_menu' 2>&1 || true)"
   assert_has "меню: пункт ctx"         "$out" "ctx"
   assert_has "меню: пункт self-update" "$out" "self-update"
+  assert_has "меню: пункт start"       "$out" "start   — новая задача"
+  assert_has "меню: deliver — патч"    "$out" "deliver — патч из зеркала"
 }
 
 test_forge_none() {
@@ -2535,9 +2537,9 @@ test_status_json_mirror_sentinels() {
 }
 
 test_menu_snapshot_runs_and_exits() {
-  # 4 = snapshot: пишущая команда — прогон и выход из меню
+  # 1 = snapshot: пишущая команда — прогон и выход из меню
   local ws reg out rc=0; ws="$(make_ws)"; reg="$(make_ws)"
-  out="$( ( printf '4\n' | {
+  out="$( ( printf '1\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -2548,9 +2550,9 @@ test_menu_snapshot_runs_and_exits() {
 }
 
 test_menu_corp_returns_to_menu() {
-  # 5 = corp (read-only) → Enter (menu_pause) → 14 = выход
+  # 6 = corp (read-only) → Enter (menu_pause) → 16 = выход
   local ws reg out; ws="$(make_ws)"; reg="$(make_ws)"
-  out="$( ( printf '5\n\n14\n' | {
+  out="$( ( printf '6\n\n16\n' | {
       source "$PBX"
       WORKSPACE="$ws"; PBX_REGISTRY_DIR="$reg"; UI_TTY=1
       TERM=xterm main
@@ -2648,6 +2650,26 @@ test_e5_start_from_corp() {
   rc=0; ( cmd_start proj fix/y ) >/dev/null 2>&1 || rc=$?
   assert_eq "start: грязное дерево → die" "$rc" "1"
   assert_eq "start: при отказе ветка не создана" "$(git -C "$E5_SRC" branch --list fix/y)" ""
+  _e5_cleanup
+}
+
+test_e5_menu_start_and_patch() {
+  # меню: 2 = start (проект, ветка) → дом; 5 = deliver --patch (проект, ветка, сообщение, --from) → ноут
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  git init -q "$E5_SRC"
+  ( cd "$E5_SRC" && git config user.email h@h && git config user.name h ) >/dev/null 2>&1
+  ( printf '2\n1\nfix/m\n' | { UI_TTY=1; TERM=xterm cmd_menu; } ) >/dev/null 2>&1 || true
+  assert_eq "меню→start: ветка от корп-dev" "$(git -C "$E5_SRC" branch --show-current)" "fix/m"
+  ( cd "$E5_SRC" && echo menu > m.txt ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/m proj ) >/dev/null 2>&1
+  _e5_corp_commit 'echo theirs > other.txt'
+  ( cd "$E5_REPO" && printf '5\n1\nfeature/M-1\nменю-патч\nfix/m\n' \
+      | { UI_TTY=1; TERM=xterm PBX_ASSUME_YES=1 cmd_menu; } ) >/dev/null 2>&1 || true
+  local B=refs/remotes/origin/feature/M-1
+  git -C "$E5_REPO" fetch -q origin >/dev/null 2>&1
+  assert_eq "меню→patch: наша правка доехала"   "$(git -C "$E5_REPO" show $B:m.txt 2>/dev/null)" "menu"
+  assert_eq "меню→patch: чужая работа цела"     "$(git -C "$E5_REPO" show $B:other.txt 2>/dev/null)" "theirs"
   _e5_cleanup
 }
 
@@ -3045,6 +3067,7 @@ test_e5_snapshot_state_stays_orphan
 test_e5_snapshot_corp_sync_optout
 test_e5_start_from_corp
 test_e5_start_without_corp_branch_dies
+test_e5_menu_start_and_patch
 test_e5_deliver_patch_e2e
 test_e5_deliver_patch_from_defaults_to_branch
 test_e5_deliver_patch_conflict_rolls_back
