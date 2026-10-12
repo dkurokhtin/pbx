@@ -2,15 +2,10 @@
 # =============================================================================
 #  pbx — единый CLI доставки проектов Pybotx (только для WSL).
 #
-#  Складывает прежние pack.sh + update.sh в один инструмент: упаковать исходники
-#  в архив и доставить их в git-репо с созданием MR/PR.
+#  Доставка правок с домашней машины в корп-репо через личное git-зеркало:
+#  ноут snapshot → дом start/push → ноут deliver (патч поверх свежего dev + MR).
 #
-#  Команды:
-#    pbx pack    <проект>
-#    pbx deliver <проект> <ветка> <сообщение> [архив] [--yes]
-#    pbx log     [проект]
-#    pbx list
-#    pbx help
+#  Команды: pbx help
 #
 #  Проекты: см. pbx list
 # =============================================================================
@@ -21,7 +16,7 @@ set -euo pipefail
 WORKSPACE="${PBX_WORKSPACE:-/mnt/c/Users/darkl/Claude/Projects/Pybotx}"
 # Где лежат git-репозитории (== GitLab) на рабочем ноуте:
 PROJECTS_ROOT="${PBX_PROJECTS_ROOT:-/root}"
-# Куда складывать архивы:
+# Служебный каталог: мета push (<проект>.meta) и логи диагностики:
 DIST_DIR="${PBX_DIST_DIR:-$WORKSPACE/_dist}"
 # Каталоги WORKSPACE, которые НЕ являются проектами (кроме _* и .*):
 PBX_IGNORE_DIRS="${PBX_IGNORE_DIRS:-docs}"
@@ -200,24 +195,24 @@ cmd_list() {
   fi
   # TTY: таблица со статусами. load_config мутирует глобали — cmd_list терминальна.
   ui_section "Проекты (реестр ∪ WORKSPACE)"
-  local p mark arch info any=0
+  local p mark meta info any=0
   while IFS= read -r p; do
     any=1
     load_config "$p"
     if [[ -d "$SRC" ]]; then mark="${C_GREEN}${G_OK}${C_RESET}"; else mark="${C_RED}${G_NO}${C_RESET}"; fi
-    arch="$DIST_DIR/$p.tar.gz"
-    if [[ -f "$arch" ]]; then
-      info="$(du -h "$arch" 2>/dev/null | awk '{print $1}'), $(date -r "$arch" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
-    else
-      info="—"
+    meta="$DIST_DIR/$p.meta" info="—"
+    if [[ -f "$meta" ]] && grep -q '^PUSH_BRANCH=' "$meta"; then
+      local pb pa
+      pb="$(sed -n 's/^PUSH_BRANCH=//p' "$meta")"; pa="$(sed -n 's/^PUSHED_AT=//p' "$meta")"
+      info="$pb, $(date -d "@$pa" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
     fi
-    printf '  %-16s SRC %s  %sархив:%s %s\n' "$p" "$mark" "$C_DIM" "$C_RESET" "$info"
+    printf '  %-16s SRC %s  %spush:%s %s\n' "$p" "$mark" "$C_DIM" "$C_RESET" "$info"
   done < <(list_projects)
   (( any )) || c_warn "  (проектов не найдено)"
   return 0
 }
 
-# ---- exclude builders (pack/deliver) ---------------------------------------
+# ---- exclude builders (push/deliver) ---------------------------------------
 # Контекст агента. По умолчанию CLAUDE.md и .claude/ в репо не едут — так
 # требуют СУБА-репы (ИБ). AGENT_FILES=1 в реестре проекта (боты Клаудс) — едут,
 # кроме личного: локальных разрешений и worktree агента.
@@ -229,9 +224,10 @@ agent_exclude_names() {
   fi
 }
 
-# Аргументы --exclude для tar. GNU tar не якорит паттерны → имя без пути
-# исключает совпадения на любой глубине (node_modules в sup-frontend/ и т.п.).
-pack_exclude_args() {
+# Что НЕ едет в снапшот push (строки --exclude=ИМЯ, без якоря: имя без пути
+# исключает совпадения на любой глубине — node_modules в sup-frontend/ и т.п.).
+# EXTRA_PACK_EXCLUDES — историческое имя ключа реестра, оставлено для совместимости.
+snapshot_exclude_args() {
   local e
   local base=( node_modules .git .venv __pycache__ .pbx.conf )
   mapfile -t -O "${#base[@]}" base < <(agent_exclude_names)
@@ -260,10 +256,10 @@ sync_exclude_args() {
   return 0   # иначе статус = последний [[ -n ]] (1 при пустом массиве) → падение под set -e у прямых вызовов
 }
 
-# ---- meta: манифест последней упаковки ---------------------------------------
+# ---- meta: манифест последнего push -------------------------------------------
 # DIST_DIR/<проект>.meta, bash-формат KEY=value (jq нет). Пишется атомарно
-# (.tmp → mv), best-effort: сбой записи меты НЕ роняет pack — архив важнее.
-# Читатели: pbx status (дрейф по коммитам), pbx log, этапы Э2/Э3.
+# (.tmp → mv), best-effort: сбой записи меты НЕ роняет push.
+# Читатели: pbx status, pbx ctx, pbx list.
 
 # meta_update <файл> KEY=VALUE… — мерж ключей в meta-файл (KEY=value, sed-читатели).
 # Существующие ключи обновляются НА МЕСТЕ (порядок строк и #-шапка сохраняются),
@@ -327,75 +323,17 @@ meta_update() {
   return 0
 }
 
-write_pack_meta() {
-  local project="$1" src="$2" out_meta="$3"
-  local commit='-' branch='-' dirty='-'
-  local st_out=''
-  if [[ -e "$src/.git" ]]; then
-    commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo '-')"
-    branch="$(git -C "$src" branch --show-current 2>/dev/null || true)"
-    [[ -n "$branch" ]] || branch='-'
-    if st_out="$(git -C "$src" status --porcelain 2>/dev/null)"; then
-      dirty="$(printf '%s' "$st_out" | grep -c . || true)"
-    fi
-  fi
-  meta_update "$out_meta" \
-    "PBX_META_VERSION=1" \
-    "PACKED_AT=$(date +%s)" \
-    "COMMIT=$commit" \
-    "BRANCH=$branch" \
-    "DIRTY_AT_PACK=$dirty"
-  return 0
-}
-
-# ---- pack ------------------------------------------------------------------
-# Упаковать исходники проекта в _dist/<проект>.tar.gz.
-# Исключаем всё, что не должно попасть в репозиторий: .git, .venv, node_modules,
-# .claude и CLAUDE.md (контекст агента — НЕ коммитим), кэши питона.
-cmd_pack() {
-  local project; project="$(strip_cr "${1:?Использование: pbx pack <проект>}")"
-  PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
-  valid_project "$project"
-  load_config "$project"
-  [[ -d "$SRC" ]] || die "Нет исходников: $SRC"
-  mkdir -p "$DIST_DIR"
-  local out="$DIST_DIR/$project.tar.gz"
-
-  ui_section "Упаковка $project" "🔵 Упаковка $project ($SRC) → $out"
-  ui_kv SRC "$SRC"
-  ui_kv OUT "$out"
-  local excludes; mapfile -t excludes < <(pack_exclude_args)
-  tar -C "$(dirname "$SRC")" "${excludes[@]}" -czf "$out" "$(basename "$SRC")"
-
-  local meta="$DIST_DIR/$project.meta"
-  write_pack_meta "$project" "$SRC" "$meta"
-
-  ui_dim "размер: $(du -h "$out" | awk '{print $1}')"
-  if [[ -f "$meta" ]]; then
-    local mcommit mbranch
-    mcommit="$(sed -n 's/^COMMIT=//p' "$meta")"
-    mbranch="$(sed -n 's/^BRANCH=//p' "$meta")"
-    if [[ "$mcommit" != '-' && -n "$mcommit" ]]; then
-      ui_dim "meta: ${mcommit:0:7} @ $mbranch"
-    fi
-  fi
-  c_green "✅ Архив готов: $out"
-}
-
 # ---- status: сбор данных одного проекта ---------------------------------------
 # Заполняет ST_*-глобали. Вызывать ПОСЛЕ load_config (берёт SRC/REPO/DIST_DIR).
 # Сентинели: строка '' (неизвестно), число -1; булевы — строки true/false.
-# ST_STALE=true ⇔ нужен новый pack: нет архива при живом SRC; (exact) есть
-# неупакованные коммиты или dirty; (heuristic) архив старее коммита или dirty.
+# ST_STALE=true ⇔ нужен новый push: SRC — git и (push не было, HEAD ушёл от
+# снапшота или есть незакоммиченные правки). Без MIRROR — всегда false.
 status_collect() {
   local project="$1"
   ST_NAME="$project"
   ST_SRC="$SRC"; ST_SRC_EXISTS=false; ST_GIT=false
   ST_BRANCH=''; ST_DIRTY=-1; ST_UPSTREAM=''; ST_AHEAD=-1; ST_BEHIND=-1
-  ST_ARCHIVE="$DIST_DIR/$project.tar.gz"; ST_ARCHIVE_EXISTS=false
-  ST_ARCHIVE_MTIME=-1; ST_ARCHIVE_SIZE=''
-  ST_META_COMMIT=''; ST_META_BRANCH=''; ST_META_PACKED_AT=-1; ST_META_DIRTY=-1
-  ST_DRIFT='none'; ST_UNPACKED=-1; ST_DIRTY_NOW=-1; ST_STALE=false
+  ST_STALE=false; ST_UNPUSHED=-1
   ST_REPO="$REPO"; ST_REPO_EXISTS=false
   ST_MIRROR="${MIRROR:-}"
   ST_PUSH_BRANCH=''; ST_PUSH_COMMIT=''; ST_PUSHED_AT=-1; ST_PUSH_SOURCE=''
@@ -413,7 +351,6 @@ status_collect() {
     if st_out="$(git -C "$ST_SRC" status --porcelain 2>/dev/null)"; then
       ST_DIRTY="$(printf '%s' "$st_out" | grep -c . || true)"
     fi
-    ST_DIRTY_NOW="$ST_DIRTY"
     ST_UPSTREAM="$(git -C "$ST_SRC" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)"
     if [[ -n "$ST_UPSTREAM" ]]; then
       local lr
@@ -425,23 +362,8 @@ status_collect() {
     fi
   fi
 
-  if [[ -f "$ST_ARCHIVE" ]]; then
-    ST_ARCHIVE_EXISTS=true
-    ST_ARCHIVE_MTIME="$(date -r "$ST_ARCHIVE" +%s 2>/dev/null || echo -1)"
-    ST_ARCHIVE_SIZE="$(du -h "$ST_ARCHIVE" 2>/dev/null | awk '{print $1}')"
-  fi
-
   local meta="$DIST_DIR/$project.meta"
   if [[ -f "$meta" ]]; then
-    ST_META_COMMIT="$(sed -n 's/^COMMIT=//p' "$meta")"
-    ST_META_BRANCH="$(sed -n 's/^BRANCH=//p' "$meta")"
-    ST_META_PACKED_AT="$(sed -n 's/^PACKED_AT=//p' "$meta")"
-    ST_META_DIRTY="$(sed -n 's/^DIRTY_AT_PACK=//p' "$meta")"
-    [[ "$ST_META_COMMIT" == '-' ]] && ST_META_COMMIT=''
-    [[ "$ST_META_BRANCH" == '-' ]] && ST_META_BRANCH=''
-    [[ "$ST_META_DIRTY" == '-' || -z "$ST_META_DIRTY" ]] && ST_META_DIRTY=-1
-    [[ "$ST_META_DIRTY" =~ ^-?[0-9]+$ ]] || ST_META_DIRTY=-1
-    [[ "$ST_META_PACKED_AT" =~ ^-?[0-9]+$ ]] || ST_META_PACKED_AT=-1
     ST_PUSH_BRANCH="$(sed -n 's/^PUSH_BRANCH=//p' "$meta")"
     ST_PUSH_COMMIT="$(sed -n 's/^PUSH_COMMIT=//p' "$meta")"
     ST_PUSHED_AT="$(sed -n 's/^PUSHED_AT=//p' "$meta")"
@@ -449,27 +371,21 @@ status_collect() {
     [[ "$ST_PUSHED_AT" =~ ^-?[0-9]+$ ]] || ST_PUSHED_AT=-1
   fi
 
-  # дрейф от последнего pack
-  if [[ "$ST_GIT" == true && "$ST_ARCHIVE_EXISTS" == true ]]; then
-    if [[ -n "$ST_META_COMMIT" ]] \
-       && git -C "$ST_SRC" cat-file -e "$ST_META_COMMIT^{commit}" 2>/dev/null; then
-      ST_DRIFT='exact'
-      ST_UNPACKED="$(git -C "$ST_SRC" rev-list --count "$ST_META_COMMIT..HEAD" 2>/dev/null || echo -1)"
-      if [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] || [[ "$ST_DIRTY_NOW" -gt 0 ]]; then
-        ST_STALE=true
-      fi
+  # отставание снапшота в зеркале от SRC
+  if [[ "$ST_GIT" == true && -n "$ST_MIRROR" ]]; then
+    if [[ -z "$ST_PUSH_COMMIT" ]]; then
+      ST_STALE=true
     else
-      ST_DRIFT='heuristic'
-      local last_ct
-      last_ct="$(git -C "$ST_SRC" log -1 --format=%ct 2>/dev/null || echo -1)"
-      if [[ "$last_ct" != -1 && "$ST_ARCHIVE_MTIME" != -1 && "$last_ct" -gt "$ST_ARCHIVE_MTIME" ]]; then
+      if [[ -n "$ST_PUSH_SOURCE" ]] \
+         && git -C "$ST_SRC" cat-file -e "$ST_PUSH_SOURCE^{commit}" 2>/dev/null; then
+        ST_UNPUSHED="$(git -C "$ST_SRC" rev-list --count "$ST_PUSH_SOURCE..HEAD" 2>/dev/null || echo -1)"
+      fi
+      local head_now; head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
+      if [[ -n "$ST_PUSH_SOURCE" && -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]] \
+         || [[ "$ST_DIRTY" != -1 && "$ST_DIRTY" -gt 0 ]]; then
         ST_STALE=true
       fi
-      [[ "$ST_DIRTY_NOW" -gt 0 ]] && ST_STALE=true
     fi
-  fi
-  if [[ "$ST_SRC_EXISTS" == true && "$ST_ARCHIVE_EXISTS" == false ]]; then
-    ST_STALE=true
   fi
   return 0
 }
@@ -496,30 +412,23 @@ _json_str_v2() {
 pad()  { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%s%*s' "$t" $((w - n)) ''; fi; }
 padr() { local t="$1" w="$2"; local n=${#t}; if (( n >= w )); then printf '%s' "$t"; else printf '%*s%s' $((w - n)) '' "$t"; fi; }
 
-# человекочитаемая метка дрейфа по ST_* текущего проекта
-status_drift_label() {
+# человекочитаемая метка: что с push-снапшотом текущего проекта
+status_push_label() {
   if [[ "$ST_SRC_EXISTS" == false ]]; then printf 'нет SRC'; return 0; fi
-  if [[ "$ST_ARCHIVE_EXISTS" == false ]]; then printf 'нет архива'; return 0; fi
-  case "$ST_DRIFT" in
-    exact)
-      local s=''
-      [[ "$ST_UNPACKED" != -1 && "$ST_UNPACKED" -gt 0 ]] && s="+${ST_UNPACKED} коммит."
-      if [[ "$ST_DIRTY_NOW" != -1 && "$ST_DIRTY_NOW" -gt 0 ]]; then
-        s="${s:+$s, }${ST_DIRTY_NOW} файл. правок"
-      fi
-      if [[ -n "$s" ]]; then printf '%s' "$s"; else printf '%s упаковано' "$G_OK"; fi
-      ;;
-    heuristic)
-      if [[ "$ST_STALE" == true ]]; then printf '~протух'; else printf '~ок'; fi
-      ;;
-    none)
-      printf 'не git — неизвестен'
-      ;;
-  esac
+  if [[ "$ST_GIT" == false ]]; then printf 'не git — неизвестно'; return 0; fi
+  if [[ -z "$ST_MIRROR" ]]; then printf 'нет MIRROR'; return 0; fi
+  if [[ -z "$ST_PUSH_COMMIT" ]]; then printf 'не пушилось'; return 0; fi
+  if [[ "$ST_STALE" == false ]]; then printf '%s в зеркале' "$G_OK"; return 0; fi
+  local s=''
+  [[ "$ST_UNPUSHED" != -1 && "$ST_UNPUSHED" -gt 0 ]] && s="+${ST_UNPUSHED} коммит."
+  if [[ "$ST_DIRTY" != -1 && "$ST_DIRTY" -gt 0 ]]; then
+    s="${s:+$s, }${ST_DIRTY} файл. правок"
+  fi
+  printf '%s после push' "${s:-SRC ушёл вперёд}"
   return 0
 }
 
-# JSON-массив статусов (схема — спека §4; порядок ключей фиксирован)
+# JSON-массив статусов (порядок ключей фиксирован)
 status_json() {
   local p first=1
   printf '['
@@ -531,16 +440,12 @@ status_json() {
       "$(_json_str "$ST_NAME")" "$(_json_str "$ST_SRC")" "$ST_SRC_EXISTS" "$ST_GIT"
     printf '"branch":"%s","dirty":%s,"upstream":"%s","ahead":%s,"behind":%s,' \
       "$(_json_str "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str "$ST_UPSTREAM")" "$ST_AHEAD" "$ST_BEHIND"
-    printf '"archive":"%s","archive_exists":%s,"archive_mtime":%s,"archive_size":"%s",' \
-      "$(_json_str "$ST_ARCHIVE")" "$ST_ARCHIVE_EXISTS" "$ST_ARCHIVE_MTIME" "$(_json_str "$ST_ARCHIVE_SIZE")"
-    printf '"meta_commit":"%s","meta_branch":"%s","meta_packed_at":%s,"meta_dirty":%s,' \
-      "$(_json_str "$ST_META_COMMIT")" "$(_json_str "$ST_META_BRANCH")" "$ST_META_PACKED_AT" "$ST_META_DIRTY"
-    printf '"drift":"%s","unpacked_commits":%s,"dirty_now":%s,"stale":%s,' \
-      "$ST_DRIFT" "$ST_UNPACKED" "$ST_DIRTY_NOW" "$ST_STALE"
     printf '"repo":"%s","repo_exists":%s,' "$(_json_str "$ST_REPO")" "$ST_REPO_EXISTS"
-    printf '"mirror":"%s","push_branch":"%s","push_commit":"%s","pushed_at":%s}' \
+    printf '"mirror":"%s","push_branch":"%s","push_commit":"%s","pushed_at":%s,' \
       "$(_json_str "$ST_MIRROR")" "$(_json_str "$ST_PUSH_BRANCH")" \
       "$(_json_str "$ST_PUSH_COMMIT")" "$ST_PUSHED_AT"
+    printf '"push_source":"%s","unpushed_commits":%s,"stale":%s}' \
+      "$(_json_str "$ST_PUSH_SOURCE")" "$ST_UNPUSHED" "$ST_STALE"
   done
   printf '\n]\n'
   return 0
@@ -571,32 +476,28 @@ cmd_status() {
     c_warn "  (проектов не найдено)"
     return 0
   fi
-  local p drift b color reset
+  local p label b color reset
   for p in "${names[@]}"; do
     load_config "$p"
     status_collect "$p"
-    drift="$(status_drift_label)"
+    label="$(status_push_label)"
     b="$ST_BRANCH"; [[ -z "$b" ]] && b='—'
     if (( ${#b} > 24 )); then b="${b:0:23}…"; fi
     local dirty_disp="$ST_DIRTY"; [[ "$dirty_disp" == -1 ]] && dirty_disp='—'
-    local arch_disp='—'
-    if [[ "$ST_ARCHIVE_EXISTS" == true ]]; then
-      if [[ "$ST_ARCHIVE_MTIME" != -1 ]]; then
-        arch_disp="$ST_ARCHIVE_SIZE $(date -d "@$ST_ARCHIVE_MTIME" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
-      else
-        arch_disp="$ST_ARCHIVE_SIZE ?"
-      fi
+    local when='—'
+    if [[ "$ST_PUSHED_AT" =~ ^[0-9]+$ ]]; then
+      when="$(date -d "@$ST_PUSHED_AT" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
     fi
     color=''; reset=''
     if (( UI_COLOR_OUT )); then
       reset="$C_RESET"
       if [[ "$ST_STALE" == true ]]; then color="$C_YELLOW"
-      elif [[ "$drift" == "$G_OK "* ]]; then color="$C_GREEN"
+      elif [[ "$label" == "$G_OK "* ]]; then color="$C_GREEN"
       else color="$C_DIM"; fi
     fi
     printf '  %s %s %s  %s %s%s%s\n' \
-      "$(pad "$p" 14)" "$(pad "$b" 24)" "$(padr "$dirty_disp" 5)" "$(pad "$arch_disp" 14)" \
-      "$color" "$drift" "$reset"
+      "$(pad "$p" 14)" "$(pad "$b" 24)" "$(padr "$dirty_disp" 5)" "$(pad "$when" 12)" \
+      "$color" "$label" "$reset"
     if [[ "$ST_REPO_EXISTS" == true && -e "$ST_REPO/.git" ]]; then
       local rb rstate
       rb="$(git -C "$ST_REPO" branch --show-current 2>/dev/null || echo '?')"
@@ -606,19 +507,7 @@ cmd_status() {
     if [[ -n "$ST_MIRROR" ]]; then
       local mline="mirror: $ST_MIRROR"
       if [[ -n "$ST_PUSH_COMMIT" ]]; then
-        local when='?'
-        if [[ "$ST_PUSHED_AT" =~ ^[0-9]+$ ]]; then
-          when="$(date -d "@$ST_PUSHED_AT" '+%d.%m %H:%M' 2>/dev/null || echo '?')"
-        fi
-        mline+=" (push: ${ST_PUSH_BRANCH:--} @ ${ST_PUSH_COMMIT:0:7}, $when"
-        local head_now=''
-        if [[ "$ST_GIT" == true ]]; then
-          head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
-        fi
-        if [[ -n "$ST_PUSH_SOURCE" && -n "$head_now" && "$ST_PUSH_SOURCE" != "$head_now" ]]; then
-          mline+=", SRC ушёл вперёд"
-        fi
-        mline+=")"
+        mline+=" (push: ${ST_PUSH_BRANCH:--} @ ${ST_PUSH_COMMIT:0:7})"
       fi
       ui_dim "$mline"
     fi
@@ -635,13 +524,13 @@ cmd_status() {
 #  git gc); refs/HEAD/индекс/config не тронуты.
 # =============================================================================
 
-# Транслирует pack_exclude_args() (единственный источник истины об исключениях)
+# Транслирует snapshot_exclude_args() (единственный источник истины об исключениях)
 # в git-pathspec той же unanchored-семантики, что tar --exclude.
 # ВАЖНО (воспроизведено): короткая форма ':!ИМЯ' падает fatal-ом на именах с
 # ведущим '_' (__pycache__: "Unimplemented pathspec magic '_'") — только длинная
 # ':(glob,exclude)'. Без '**/' матч только на верхнем уровне (вложенные
 # node_modules утекли бы) — нужны ОБЕ формы: '**/ИМЯ' и '**/ИМЯ/**'.
-pack_exclude_pathspecs() {
+snapshot_exclude_pathspecs() {
   local line name
   while IFS= read -r line; do
     [[ "$line" == --exclude=* ]] || continue
@@ -650,7 +539,7 @@ pack_exclude_pathspecs() {
     [[ "$name" == ".git" ]] && continue   # git add сам никогда не тронет .git
     printf ':(glob,exclude)**/%s\n' "$name"
     printf ':(glob,exclude)**/%s/**\n' "$name"
-  done < <(pack_exclude_args)
+  done < <(snapshot_exclude_args)
   return 0
 }
 
@@ -713,7 +602,7 @@ snapshot_tree() {
   fi
 
   local -a pathspecs=(".")
-  while IFS= read -r ps; do pathspecs+=("$ps"); done < <(pack_exclude_pathspecs)
+  while IFS= read -r ps; do pathspecs+=("$ps"); done < <(snapshot_exclude_pathspecs)
 
   # вывод git ловим в переменные: warning на stderr не должен испортить $tree
   local add_out
@@ -731,7 +620,7 @@ snapshot_tree() {
   inc_specs=()
   while IFS= read -r ps; do
     inc_specs+=("${ps/:(glob,exclude)/:(glob)}")
-  done < <(pack_exclude_pathspecs)
+  done < <(snapshot_exclude_pathspecs)
   if (( ${#inc_specs[@]} > 0 )); then
     if ! rm_out="$(GIT_INDEX_FILE="$tmp_index" git -C "$src" rm -r --cached --ignore-unmatch -q -- "${inc_specs[@]}" 2>&1)"; then
       rm -f "$tmp_index"
@@ -1496,7 +1385,7 @@ ctx_home_has_work() {
   git -C "$ST_SRC" cat-file -e "$CTX_BASE_SHA^{commit}" 2>/dev/null || return 0
   local -a specs=(".")
   local ps
-  while IFS= read -r ps; do specs+=("$ps"); done < <(pack_exclude_pathspecs)
+  while IFS= read -r ps; do specs+=("$ps"); done < <(snapshot_exclude_pathspecs)
   if git -C "$ST_SRC" diff --quiet "$CTX_BASE_SHA" -- "${specs[@]}" 2>/dev/null; then
     return 1
   fi
@@ -1596,9 +1485,7 @@ ctx_compare() {
   fi
 
   # --- гигиена транспорта дома --------------------------------------------------
-  # Доставка идёт через зеркало (push → deliver --patch), архив в ней не
-  # участвует: «архив протух» в ctx больше не показываем (Э6; свежесть архива
-  # видна в pbx status). «Push отстаёт» — только когда дома ЕСТЬ что доставлять:
+  # «Push отстаёт» — только когда дома ЕСТЬ что доставлять:
   # дерево SRC отличается от корп-tip (с теми же исключениями, что у pbx push).
   # Дом, равный корпу, не требует push — предупреждение было бы шумом.
   if [[ -n "$ST_PUSH_COMMIT" && -n "$ST_PUSH_SOURCE" ]] && ctx_home_has_work; then
@@ -1686,9 +1573,8 @@ ctx_json() {
     # home
     local head_now=''
     [[ "$ST_GIT" == true ]] && head_now="$(git -C "$ST_SRC" rev-parse HEAD 2>/dev/null || true)"
-    printf '"home":{"branch":"%s","dirty":%s,"head":"%s","meta_commit":"%s","packed_at":%s,"push_commit":"%s","pushed_at":%s},' \
+    printf '"home":{"branch":"%s","dirty":%s,"head":"%s","push_commit":"%s","pushed_at":%s},' \
       "$(_json_str_v2 "$ST_BRANCH")" "$ST_DIRTY" "$(_json_str_v2 "$head_now")" \
-      "$(_json_str_v2 "$ST_META_COMMIT")" "$ST_META_PACKED_AT" \
       "$(_json_str_v2 "$ST_PUSH_COMMIT")" "$ST_PUSHED_AT"
     # corp (null при unknown-без-данных: rc≠0)
     if (( rc == 0 )); then
@@ -1841,7 +1727,7 @@ cmd_start() {
     || die "Не удалось создать ветку '$branch' от $ref"
   local tip; tip="$(git -C "$SRC" rev-parse --short "$ref")"
   c_green "✅ $project: ветка '$branch' от корп-$BASE_BRANCH ($tip)."
-  ui_dim "Дальше: правки → pbx push $project $branch → на ноуте: pbx deliver $project <ветка> \"<сообщение>\" --patch --from $branch"
+  ui_dim "Дальше: правки → pbx push $project $branch → на ноуте: pbx deliver $project <ветка> \"<сообщение>\" --from $branch"
   return 0
 }
 
@@ -1918,12 +1804,14 @@ deliver_patch_rollback() {
 }
 
 # ---- deliver ---------------------------------------------------------------
-# Распаковать архив в репозиторий, создать ветку от BASE_BRANCH, закоммитить и
-# запушить с созданием MR/PR в TARGET_BRANCH (по умолчанию dev; настраивается).
+# По умолчанию — патч-доставка (Э5): на свежий BASE_BRANCH ложится только наш
+# дифф из ветки зеркала, дальше guard → commit → MR/PR в TARGET_BRANCH.
+# --mirror (запасной): вся ветка зеркала раскладывается через rsync --delete.
+# --patch принимается для совместимости (это и есть режим по умолчанию).
 cmd_deliver() {
   # --yes / -y (в любой позиции) или PBX_ASSUME_YES=1 — пропустить guard-подтверждение
   local assume_yes="${PBX_ASSUME_YES:-0}"
-  local from_mirror=0 patch_mode=0 patch_from="" patch_base=""
+  local from_mirror=0 patch_mode=1 patch_from="" patch_base=""
   local _a _args=() _want=""
   for _a in "$@"; do
     if [[ -n "$_want" ]]; then
@@ -1932,7 +1820,7 @@ cmd_deliver() {
     case "$_a" in
       --yes|-y) assume_yes=1 ;;
       --mirror) from_mirror=1 ;;
-      --patch)  patch_mode=1 ;;
+      --patch)  ;;
       --from)   _want=patch_from ;;
       --base)   _want=patch_base ;;
       --from=*) patch_from="$(strip_cr "${_a#--from=}")" ;;
@@ -1942,33 +1830,22 @@ cmd_deliver() {
   done
   [[ -z "$_want" ]] || die "После --${_want#patch_} нужно значение"
   set -- ${_args[@]+"${_args[@]}"}
-  if [[ -n "$patch_from$patch_base" && "$patch_mode" != 1 ]]; then
-    die "--from/--base работают только вместе с --patch"
+  if (( from_mirror )); then
+    [[ -z "$patch_from$patch_base" ]] || die "--from/--base — для патч-доставки; с --mirror ветка зеркала = <ветка>"
+    patch_mode=0
   fi
-  if (( patch_mode && from_mirror )); then
-    die "--patch и --mirror взаимоисключающие: --patch сам берёт ветку из зеркала"
-  fi
+  (( $# <= 3 )) || die "Лишний аргумент '$4': архивный режим удалён — доставка только через зеркало (pbx push дома → pbx deliver ... --from <ветка>)"
 
-  local project branch msg archive
-  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка зеркала>] [--base <sha>]]}")"
+  local project branch msg
+  project="$(strip_cr "${1:?Использование: pbx deliver <проект> <ветка> <сообщение> [--from <ветка зеркала>] [--base <sha>] [--yes] [--mirror]}")"
   branch="$(strip_cr "${2:?Укажи ветку (feature/PROJ-123-...) 2-м аргументом}")"
   msg="$(strip_cr "${3:?Укажи сообщение коммита 3-м аргументом}")"
-  archive="$(strip_cr "${4:-$DIST_DIR/$project.tar.gz}")"
-
-  # Windows-путь → WSL (для archive)
-  if command -v wslpath >/dev/null 2>&1 && [[ "$archive" == *:\\* || "$archive" == *:/* ]]; then
-    archive="$(wslpath -u "$archive")"
-  fi
 
   load_config "$project"
   PBX_CURRENT_PROJECT="$project"   # для авто-диагностики в die
   local repo="$REPO"
 
-  if [[ "$from_mirror" == 1 || "$patch_mode" == 1 ]]; then
-    [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' (нужен для --mirror/--patch). Добавь MIRROR=... в $PBX_REGISTRY_DIR/$project.conf"
-  else
-    [[ -f "$archive" ]] || die "Архив не найден: $archive (сначала: pbx pack $project)"
-  fi
+  [[ -n "${MIRROR:-}" ]] || die "Не задан MIRROR для '$project' — доставка идёт через зеркало. Добавь MIRROR=... в $PBX_REGISTRY_DIR/$project.conf"
   # Проверка конвенции ветки — предупреждаем, но не блокируем
   [[ "$branch" =~ ^(feature|fix|hotfix|bugfix|chore)/ ]] \
     || c_warn "⚠️  Ветка '$branch' не по конвенции feature/PROJ-123-… — продолжаю как есть."
@@ -2006,32 +1883,16 @@ cmd_deliver() {
       return 0
     fi
   else
-    # Распаковка во временную папку
+    # --mirror (запасной): ветка зеркала целиком во временную папку → rsync --delete
     local tmp; tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
-    if [[ "$from_mirror" == 1 ]]; then
-      # Источник — ветка зеркала (Э2, вариант В): наполняем ту же tmp-директорию,
-      # что раньше наполнял архив; дальше НЕТРОНУТЫЙ rsync/guard-путь.
-      c_blue "🔵 Забираю '$branch' из зеркала"
-      if ! GIT_TERMINAL_PROMPT=0 timeout 30 git fetch -q "$MIRROR" "$branch" 2>/dev/null; then
-        die "Не удалось получить '$branch' из зеркала ($MIRROR). Проверь PAT/ключ и срок действия, либо используй архивный путь."
-      fi
-      git archive FETCH_HEAD | tar -x -C "$tmp" \
-        || die "Не удалось развернуть снапшот из FETCH_HEAD"
-    else
-      case "$archive" in
-        *.zip)          unzip -q "$archive" -d "$tmp" ;;
-        *.tar.gz|*.tgz) tar -xzf "$archive" -C "$tmp" ;;
-        *.tar)          tar -xf "$archive" -C "$tmp" ;;
-        *) die "Неизвестный формат архива: $archive" ;;
-      esac
+    c_blue "🔵 Забираю '$branch' из зеркала (режим --mirror)"
+    if ! GIT_TERMINAL_PROMPT=0 timeout 30 git fetch -q "$MIRROR" "$branch" 2>/dev/null; then
+      die "Не удалось получить '$branch' из зеркала ($MIRROR). Проверь PAT/ключ и срок действия."
     fi
-    # Если внутри единственный корневой каталог — заходим в него
+    git archive FETCH_HEAD | tar -x -C "$tmp" \
+      || die "Не удалось развернуть снапшот из FETCH_HEAD"
     local inner="$tmp"
-    if [[ $(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 \
-       && $(find "$tmp" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]; then
-      inner="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d)"
-    fi
 
     # Полная синхронизация (сохраняем служебные файлы репозитория)
     ui_section "Синхронизирую файлы в $repo"
@@ -2052,8 +1913,8 @@ cmd_deliver() {
   fi
 
   # ---- guard: показать changeset и подтвердить перед commit/push -------------
-  # Ловит «зеркальную» доставку от устаревшего снимка: rsync --delete молча
-  # откатывает/удаляет чужую влитую в BASE_BRANCH работу. Обход: --yes / PBX_ASSUME_YES=1.
+  # Показывает, что уедет в MR; в --mirror ловит доставку от устаревшего снимка
+  # (rsync --delete молча откатывает чужую влитую работу). Обход: --yes / PBX_ASSUME_YES=1.
   ui_section "Изменения к доставке" \
     "📋 Будет закоммичено в '$branch' → MR в '$TARGET_BRANCH' (git diff --cached --stat):"
   ui_kv BRANCH "$branch"
@@ -2068,7 +1929,7 @@ cmd_deliver() {
     if (( patch_mode )); then
       c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (удалены в твоей ветке зеркала — проверь, что это намеренно):"
     else
-      c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
+      c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (--mirror: частая причина — устаревший снимок + rsync --delete):"
     fi
     while IFS= read -r f; do c_warn "     - $f"; done <<< "$deleted"
   fi
@@ -2133,13 +1994,12 @@ collect_diag() {
 
     # [env] — WSL, версии инструментов, ключевые пути, PBX_* env
     local wsl=no; grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && wsl=yes
-    printf '[env]     wsl=%s git=%s rsync=%s tar=%s gh=%s unzip=%s\n' \
+    printf '[env]     wsl=%s git=%s rsync=%s tar=%s gh=%s\n' \
       "$wsl" \
       "$(git --version 2>/dev/null | awk '{print $3}')" \
       "$(rsync --version 2>/dev/null | awk 'NR==1{print $3}')" \
       "$(tar --version 2>/dev/null | awk 'NR==1{print $NF}')" \
-      "$(command -v gh >/dev/null && gh --version 2>/dev/null | awk 'NR==1{print $3}' || echo '—')" \
-      "$(command -v unzip >/dev/null && echo yes || echo '—')"
+      "$(command -v gh >/dev/null && gh --version 2>/dev/null | awk 'NR==1{print $3}' || echo '—')"
     printf '[env]     WORKSPACE=%s PROJECTS_ROOT=%s DIST_DIR=%s REGISTRY=%s\n' \
       "$WORKSPACE" "$PROJECTS_ROOT" "$DIST_DIR" "$PBX_REGISTRY_DIR"
     local pbxenv; pbxenv="$(env | grep -E '^PBX_' | sort | paste -sd' ' -)"
@@ -2147,8 +2007,8 @@ collect_diag() {
 
     if [[ -n "$project" ]]; then
       load_config "$project"
-      printf '[config]  project=%s SRC=%s REPO=%s BASE=%s TARGET=%s FORGE=%s\n' \
-        "$project" "$SRC" "$REPO" "$BASE_BRANCH" "$TARGET_BRANCH" "$FORGE"
+      printf '[config]  project=%s SRC=%s REPO=%s BASE=%s TARGET=%s FORGE=%s MIRROR=%s\n' \
+        "$project" "$SRC" "$REPO" "$BASE_BRANCH" "$TARGET_BRANCH" "$FORGE" "${MIRROR:-—}"
       printf '[config]  PACK_EXCL=(%s) SYNC_EXCL=(%s)\n' \
         "${EXTRA_PACK_EXCLUDES[*]:-}" "${EXTRA_SYNC_EXCLUDES[*]:-}"
 
@@ -2171,21 +2031,15 @@ collect_diag() {
         printf '[repo]    REPO не git: %s\n' "$REPO"
       fi
 
-      local arch="$DIST_DIR/$project.tar.gz"
-      if [[ -f "$arch" ]]; then
-        printf '[archive] %s size=%s mtime=%s files=%s\n' "$arch" \
-          "$(du -h "$arch" 2>/dev/null | awk '{print $1}')" \
-          "$(date -r "$arch" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')" \
-          "$(tar -tzf "$arch" 2>/dev/null | wc -l | tr -d ' ')"
-        local metaf="$DIST_DIR/$project.meta"
-        if [[ -f "$metaf" ]]; then
-          printf '[archive] meta: commit=%s branch=%s packed_at=%s\n' \
-            "$(sed -n 's/^COMMIT=//p' "$metaf")" \
-            "$(sed -n 's/^BRANCH=//p' "$metaf")" \
-            "$(date -d "@$(sed -n 's/^PACKED_AT=//p' "$metaf")" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
-        fi
+      local metaf="$DIST_DIR/$project.meta"
+      if [[ -f "$metaf" ]] && grep -q '^PUSH_BRANCH=' "$metaf"; then
+        printf '[push]    branch=%s commit=%s source=%s at=%s\n' \
+          "$(sed -n 's/^PUSH_BRANCH=//p' "$metaf")" \
+          "$(sed -n 's/^PUSH_COMMIT=//p' "$metaf")" \
+          "$(sed -n 's/^PUSH_SOURCE_COMMIT=//p' "$metaf")" \
+          "$(date -d "@$(sed -n 's/^PUSHED_AT=//p' "$metaf")" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '—')"
       else
-        printf '[archive] нет архива: %s\n' "$arch"
+        printf '[push]    push-меты нет: %s\n' "$metaf"
       fi
     fi
     true
@@ -2436,42 +2290,40 @@ self_update_hint() {
 cmd_help() {
   if (( ! UI_COLOR_OUT )); then
     cat <<'EOF'
-pbx — доставка проектов Pybotx (WSL)
+pbx — доставка проектов Pybotx через личное зеркало (WSL)
 
-  pbx pack    <проект>                          (запасной путь) упаковать в _dist/<проект>.tar.gz
-  pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
                                                 + корп-BASE_BRANCH → ветка corp-<BASE_BRANCH> зеркала (CORP_SYNC=0 в conf — выключить)
   pbx start   <проект> <ветка>                  ДОМ: новая задача — ветка в SRC от corp-<BASE_BRANCH> зеркала (свежий корп)
-  pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
   pbx ctx     [проект] [--json]                 ДОМ: вердикт готовности к доставке (сравнение дом↔корп по снимку); --json — для ИИ
-  pbx deliver <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка зеркала>] [--base <sha>]]
-                                                распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH (см. FORGE)
-                                                --patch: вместо rsync --delete накладывает ТОЛЬКО наш дифф (база → ветка зеркала
-                                                --from, по умолчанию = <ветка>) поверх свежего BASE_BRANCH; база — общий предок с
-                                                корпом (ветки от pbx start) или --base
-                                                перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить)
+  pbx push    <проект> [ветка]                  ДОМ: снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
+  pbx deliver <проект> <ветка> <сообщение> [--from <ветка зеркала>] [--base <sha>] [--yes] [--mirror]
+                                                НОУТ: на свежий BASE_BRANCH ложится ТОЛЬКО наш дифф (база → ветка зеркала
+                                                --from, по умолчанию = <ветка>), ветка <ветка>, MR/PR в TARGET_BRANCH (см. FORGE);
+                                                база — общий предок с корпом (ветки от pbx start) или --base;
+                                                перед коммитом показывает changeset и просит подтверждения (--yes/PBX_ASSUME_YES — пропустить);
+                                                отказ или патч, который не лёг, — откат без коммита (репо на чистом BASE_BRANCH).
+                                                --mirror (запасной): вся ветка зеркала через rsync --delete — только если дом == корп.
+                                                --patch принимается для совместимости (это режим по умолчанию).
+  pbx corp    [проект] [--json]                 ДОМ: показать снимок корп-состояния из зеркала (возраст, dev-tip, ветки); --json — для ИИ
+  pbx status  [проект] [--json]                 сводка: ветка, dirty, последний push и отстаёт ли он от SRC
   pbx log     [проект]                          диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log
-                                                (config/repo/archive/env; pbx также сам пишет её в этот файл при любой ошибке)
-  pbx status  [проект] [--json]                 сводка: ветка, dirty, дрейф от последнего pack, свежесть архива
+                                                (config/repo/push/env; pbx также сам пишет её в этот файл при любой ошибке)
   pbx add     <имя> [путь]                      завести проект в реестр (SRC=путь|$PWD)
   pbx scan (--repo|--src) [каталог] [--dry-run]  заполнить реестр из найденных репо
   pbx self-update [--check]                     обновить pbx из зеркала инструмента (SELF_MIRROR в ~/.config/pbx/self.conf); --check — только проверить
   pbx list                                      показать проекты (реестр ∪ WORKSPACE)
+  pbx                                           интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)
   pbx help                                      эта справка
 
 Проекты: см. `pbx list`
 
-Штатный поток (через зеркало, патч-доставка):
+Поток:
   pbx snapshot <проект>                       # ноут: корп-dev → corp-dev зеркала + снимок pbx/state
   pbx start <проект> fix/name                 # дом: ветка от corp-dev
   pbx ctx <проект>                            # дом: вердикт готовности ok/warn/danger
   pbx push <проект> fix/name                  # дом: снапшот → ветка зеркала
-  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание" --patch --from fix/name   # ноут
-
-Запасные режимы (rsync --delete всего снимка — только если дом == корп):
-  pbx pack <проект>  +  pbx deliver <проект> <ветка> "<сообщение>"   # через архив
-  pbx deliver <проект> <ветка> "<сообщение>" --mirror               # ветка зеркала целиком
+  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание" --from fix/name   # ноут
 
 Прочее:
   pbx log <проект>            # собрать диагностику после ошибки
@@ -2479,7 +2331,7 @@ pbx — доставка проектов Pybotx (WSL)
 
 Переопределяемые переменные окружения:
   PBX_WORKSPACE (=/mnt/c/Users/darkl/Claude/Projects/Pybotx)
-  PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR   PBX_BASE_BRANCH (=dev)
+  PBX_PROJECTS_ROOT (=/root)   PBX_DIST_DIR (мета push и логи)   PBX_BASE_BRANCH (=dev)
   PBX_TARGET_BRANCH (=dev)     PBX_FORGE (=gitlab)
   PBX_ASSUME_YES (=0)          пропустить подтверждение deliver-guard (как --yes)
   PBX_SELF_MIRROR              зеркало pbx для self-update (иначе SELF_MIRROR= из ~/.config/pbx/self.conf)
@@ -2489,46 +2341,45 @@ pbx — доставка проектов Pybotx (WSL)
   BASE_BRANCH=dev            от какой ветки ответвляемся
   TARGET_BRANCH=dev          куда MR/PR (master-MR обычно вручную перед релизом)
   FORGE=gitlab               gitlab | github | none
+  MIRROR=<url>               личное зеркало (обязательно для push/start/deliver)
   AGENT_FILES=0              1 — CLAUDE.md и .claude/ едут в репо (кроме settings.local.json и worktrees)
-  EXTRA_PACK_EXCLUDES=(dist)  доп. исключения упаковки
-  EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка
+  EXTRA_PACK_EXCLUDES=(dist)  доп. исключения снапшота push (имя ключа историческое)
+  EXTRA_SYNC_EXCLUDES=(build) доп. исключения синка deliver --mirror
   Слои: дефолт → $WORKSPACE/.pbx.conf → реестр <имя>.conf → проектный <SRC>/.pbx.conf → env PBX_* (env побеждает).
 
 Реестр проектов ($PBX_REGISTRY_DIR, свой на каждой машине):
-  <имя>.conf: SRC=<путь к исходникам здесь>   REPO=<git-репо для deliver>
+  <имя>.conf: SRC=<путь к исходникам здесь>   REPO=<git-репо для deliver>   MIRROR=<зеркало>
   плюс BASE_BRANCH/TARGET_BRANCH/FORGE/EXTRA_*.
   Проект берётся из реестра, иначе из $WORKSPACE/<имя> (SRC) и $PROJECTS_ROOT/<имя> (REPO).
 EOF
     return 0
   fi
   cat <<EOF
-${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx (WSL)
+${C_BOLD}pbx${C_RESET} — доставка проектов Pybotx через личное зеркало (WSL)
 
-${C_BOLD}Команды${C_RESET}
-  ${C_CYAN}pbx pack${C_RESET}    <проект>                ${C_DIM}упаковать в _dist/<проект>.tar.gz${C_RESET}
-  ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
+${C_BOLD}Команды${C_RESET} ${C_DIM}(в порядке потока)${C_RESET}
   ${C_CYAN}pbx snapshot${C_RESET} [проект]              ${C_DIM}ноут: снимок корп-состояния → pbx/state + корп-dev → corp-dev зеркала${C_RESET}
   ${C_CYAN}pbx start${C_RESET}   <проект> <ветка>        ${C_DIM}дом: новая задача — ветка от corp-dev зеркала${C_RESET}
-  ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
   ${C_CYAN}pbx ctx${C_RESET}     [проект] [--json]       ${C_DIM}дом: вердикт готовности к доставке (ok/warn/danger)${C_RESET}
-  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [архив] [--yes] [--mirror | --patch [--from <ветка>] [--base <sha>]]
-                                          ${C_DIM}распаковать в репо, ветка от BASE_BRANCH, MR/PR в TARGET_BRANCH${C_RESET}
-                                          ${C_DIM}--patch — только наш дифф из ветки зеркала поверх свежего dev (без rsync --delete)${C_RESET}
-                                          ${C_DIM}перед коммитом показывает changeset и просит подтверждения${C_RESET}
+  ${C_CYAN}pbx push${C_RESET}    <проект> [ветка]        ${C_DIM}дом: снапшот рабочего дерева → ветка зеркала (MIRROR)${C_RESET}
+  ${C_CYAN}pbx deliver${C_RESET} <проект> <ветка> <сообщение> [--from <ветка>] [--base <sha>] [--yes] [--mirror]
+                                          ${C_DIM}ноут: только наш дифф из ветки зеркала поверх свежего dev → MR/PR${C_RESET}
+                                          ${C_DIM}guard показывает changeset; отказ или конфликт — откат без коммита${C_RESET}
+                                          ${C_DIM}--mirror (запасной) — вся ветка зеркала через rsync --delete${C_RESET}
+  ${C_CYAN}pbx corp${C_RESET}    [проект] [--json]       ${C_DIM}дом: корп-состояние из зеркала (для ИИ: --json)${C_RESET}
+  ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, последний push и отставание от SRC${C_RESET}
   ${C_CYAN}pbx log${C_RESET}     [проект]                ${C_DIM}диагностика для ИИ-агента → stdout + _dist/pbx-<проект>.log${C_RESET}
-  ${C_CYAN}pbx status${C_RESET}  [проект] [--json]        ${C_DIM}сводка: ветка, dirty, дрейф от последнего pack${C_RESET}
   ${C_CYAN}pbx add${C_RESET}     <имя> [путь]            ${C_DIM}завести проект в реестр (SRC=путь|\$PWD)${C_RESET}
   ${C_CYAN}pbx scan${C_RESET}    (--repo|--src) [каталог] [--dry-run]  ${C_DIM}заполнить реестр из найденных репо${C_RESET}
   ${C_CYAN}pbx self-update${C_RESET} [--check]          ${C_DIM}обновить pbx из зеркала (ноут); --check — только проверить${C_RESET}
   ${C_CYAN}pbx list${C_RESET}                            ${C_DIM}показать проекты (реестр ∪ WORKSPACE)${C_RESET}
   ${C_CYAN}pbx${C_RESET}                                 ${C_DIM}интерактивное меню (в терминале; PBX_NO_MENU=1 — отключить)${C_RESET}
 
-${C_BOLD}Примеры${C_RESET}
-  pbx pack sup
-  pbx deliver sup feature/SUBA-2147-fix-name "Описание изменений"
-  pbx start sup fix/name ${C_DIM}# дом: задача от свежего корпа${C_RESET}
-  pbx deliver sup feature/SUBA-2147-fix-name "Описание" --patch --from fix/name
-  pbx log sup
+${C_BOLD}Поток${C_RESET}
+  pbx snapshot sup               ${C_DIM}# ноут${C_RESET}
+  pbx start sup fix/name         ${C_DIM}# дом: задача от свежего корпа${C_RESET}
+  pbx push sup fix/name          ${C_DIM}# дом${C_RESET}
+  pbx deliver sup feature/SUBA-2147-fix-name "Описание" --from fix/name   ${C_DIM}# ноут${C_RESET}
 
 ${C_BOLD}Окружение${C_RESET}  ${C_DIM}PBX_WORKSPACE PBX_PROJECTS_ROOT PBX_DIST_DIR PBX_BASE_BRANCH${C_RESET}
             ${C_DIM}PBX_TARGET_BRANCH PBX_FORGE PBX_ASSUME_YES PBX_NO_MENU${C_RESET}
@@ -2719,7 +2570,7 @@ menu_pause() {
   return 0
 }
 
-# menu_project_flow <pack|push|deliver|log>: выбор проекта → параметры → вызов cmd_*.
+# menu_project_flow <start|push|patch|log>: выбор проекта → параметры → вызов cmd_*.
 # rc=0 — команда выполнена, выйти из меню; rc=1 — вернуться в меню.
 # menu_read_line <промпт> <заготовка> <переменная> — строка ввода для меню:
 # в TTY с редактируемой заготовкой (read -e -i), в пайпе — простой read.
@@ -2745,10 +2596,6 @@ menu_project_flow() {
   idx="$(menu_select "Проект:" "${projects[@]}")" || return 1
   project="${projects[idx]}"
   case "$action" in
-    pack)
-      cmd_pack "$project"
-      return 0
-      ;;
     push)
       load_config "$project"
       local cur_branch=''
@@ -2783,7 +2630,7 @@ menu_project_flow() {
       cmd_start "$project" "$branch"
       return 0
       ;;
-    deliver|patch)
+    patch)
       menu_read_line "Ветка: " "feature/" branch || return 1
       if [[ -z "$branch" || "$branch" == "feature/" ]]; then
         c_warn "(ветка не задана — отмена)"
@@ -2796,16 +2643,11 @@ menu_project_flow() {
         c_warn "(сообщение пустое — отмена)"
         return 1
       fi
-      if [[ "$action" == deliver ]]; then
-        ui_dim "→ pbx deliver $project $branch \"$msg\""
-        cmd_deliver "$project" "$branch" "$msg"
-        return 0
-      fi
       local from=''
       menu_read_line "Ветка зеркала (--from, пусто = $branch): " "" from || return 1
       [[ -n "$from" ]] || from="$branch"
-      ui_dim "→ pbx deliver $project $branch \"$msg\" --patch --from $from"
-      cmd_deliver "$project" "$branch" "$msg" --patch --from "$from"
+      ui_dim "→ pbx deliver $project $branch \"$msg\" --from $from"
+      cmd_deliver "$project" "$branch" "$msg" --from "$from"
       return 0
       ;;
   esac
@@ -2827,8 +2669,6 @@ cmd_menu() {
     'status  — сводка по проектам'
     'log     — диагностика проекта'
     'list    — список проектов'
-    'pack    — запасной путь: упаковать в архив'
-    'deliver архива — запасной путь (rsync --delete всего снимка)'
     'scan    — заполнить реестр (подсказка)'
     'add     — добавить проект (подсказка)'
     'self-update — обновить pbx из зеркала (ноут)'
@@ -2847,13 +2687,11 @@ cmd_menu() {
       6) cmd_status; menu_pause ;;
       7) menu_project_flow log || true ;;
       8) cmd_list; menu_pause ;;
-      9) if menu_project_flow pack;    then return 0; fi ;;
-      10) if menu_project_flow deliver; then return 0; fi ;;
-      11) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
-      12) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
-      13) cmd_self_update || true; menu_pause ;;
-      14) cmd_help; menu_pause ;;
-      15) return 0 ;;
+      9) c_blue "🔵 Синтаксис: pbx scan (--repo|--src) [каталог] [--dry-run]"; return 0 ;;
+      10) c_blue "🔵 Синтаксис: pbx add <имя> [путь-SRC]"; return 0 ;;
+      11) cmd_self_update || true; menu_pause ;;
+      12) cmd_help; menu_pause ;;
+      13) return 0 ;;
     esac
   done
 }
@@ -2871,7 +2709,7 @@ main() {
   fi
   local cmd="$1"; shift || true
   case "$cmd" in
-    pack)               require_wsl; cmd_pack "$@" ;;
+    pack)               die "pbx pack удалён: доставка только через зеркало — pbx push <проект> <ветка> дома, pbx deliver на ноуте" ;;
     push)               require_wsl; cmd_push "$@" ;;
     start)              require_wsl; cmd_start "$@" ;;
     snapshot)           cmd_snapshot "$@" ;;

@@ -2,10 +2,10 @@
 """Генерация демо-кастов pbx (asciicast v2) ЗАХВАТОМ РЕАЛЬНЫХ СЕССИЙ через pty.
 
 Четыре ролика — по одному на фичу (каждый в свой раздел README):
-  hero    — штатный поток Э5: меню pbx → snapshot (ноут) → start + push (дом) → deliver --patch (ноут)
-  status  — сводка: дрейф от pack, зеркало, «SRC ушёл вперёд»
+  hero    — штатный поток Э5: меню pbx → snapshot (ноут) → start + push (дом) → deliver (ноут)
+  status  — сводка: последний push в зеркало и отставание SRC
   corp    — Э3: pbx snapshot (ноут) → pbx corp (дом), обе стороны
-  guard   — страховка deliver --patch: guard на удалении → «n»; патч не лёг → откат без коммита
+  guard   — страховка deliver: guard на удалении → «n»; патч не лёг → откат без коммита
 
 Запуск:  python3 docs/demo/make_cast.py            # все ролики → /tmp/pbx-demo/*.cast
          python3 docs/demo/make_cast.py corp guard # выборочно
@@ -179,7 +179,7 @@ def make_src_tree(ws, *projects):
 # ---------------------------------------------------------------- сценарии --
 
 def cast_hero():
-    """Штатный поток (Э5): snapshot (ноут) → start + push (дом) → deliver --patch (ноут)."""
+    """Штатный поток (Э5): snapshot (ноут) → start + push (дом) → deliver (ноут)."""
     base, hreg, nreg, ws = fresh('flow', 'flow-hreg', 'flow-nreg', 'flow-ws')  # ws пустой: в меню/snapshot только sup
     corp = os.path.join(base, 'corp.git')
     mdir = os.path.join(base, 'mirror.git')
@@ -211,7 +211,7 @@ def cast_hero():
         (1.4, b'\x1b[B'),  # ↓ start
         (0.6, b'\x1b[B'),  # ↓ ctx
         (0.6, b'\x1b[B'),  # ↓ push
-        (0.6, b'\x1b[B'),  # ↓ deliver --patch
+        (0.6, b'\x1b[B'),  # ↓ deliver
         (1.0, b'\x1b[A'), (0.35, b'\x1b[A'), (0.35, b'\x1b[A'), (0.35, b'\x1b[A'),
         (0.9, b'\r'),      # Enter → snapshot (корп-dev → corp-dev зеркала)
     ])
@@ -234,18 +234,18 @@ def cast_hero():
     comment('# тем временем в корп-dev влили чужой MR — патч его не откатит')
     comment('# ноут: только наш дифф поверх свежего dev → MR', lead=0.6)
     # ≤ 74 символов с приглашением — иначе перенос строки в 76 колонках
-    type_cmd('pbx deliver sup feature/SUP-7 "SUP-7: виджет" --patch --from fix/widget')
+    type_cmd('pbx deliver sup feature/SUP-7 "SUP-7: виджет" --from fix/widget')
     run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-7', 'SUP-7: виджет',
-             '--patch', '--from', 'fix/widget'],
+             '--from', 'fix/widget'],
             keys=[(3.5, b'y'), (0.6, b'\r')], env=nenv)   # guard: показал дифф → «y»
     emit(1.4, '\x1b[1;32m$\x1b[0m ')
     emit(2.4, '\r\n')
     finish_cast(os.path.join(ROOT, 'hero.cast'),
-                'pbx: snapshot → start → push → deliver --patch')
+                'pbx: snapshot → start → push → deliver')
 
 
 def cast_status():
-    """Сводка: дрейф от последнего pack + зеркало + «SRC ушёл вперёд»."""
+    """Сводка: последний push в зеркало и отставание SRC (коммит + правки)."""
     ws, reg, mdir = fresh('st/ws', 'st/reg', 'st/mirror.git')
     make_src_tree(ws, 'vnd')
     src = os.path.join(ws, 'sup')
@@ -258,7 +258,6 @@ def cast_status():
     git('init', '-q', '--bare', mdir, cwd=ROOT)
     write_conf(reg, 'sup', SRC=src, MIRROR=mdir)
     env = env_for(ws, reg)
-    pbx_quiet(['pack', 'sup'], env)          # архив + мета
     pbx_quiet(['push', 'sup'], env)          # push-мета (ветка → зеркало)
     with open(os.path.join(src, 'index.js'), 'w') as f:
         f.write('export const idx = 1\n')
@@ -272,7 +271,7 @@ def cast_status():
     run_pty(['bash', PBX, 'status'], keys=[], env=env)
     emit(1.4, '\x1b[1;32m$\x1b[0m ')
     emit(2.4, '\r\n')
-    finish_cast(os.path.join(ROOT, 'status.cast'), 'pbx status — дрейф и зеркало')
+    finish_cast(os.path.join(ROOT, 'status.cast'), 'pbx status — push и отставание SRC')
 
 
 def cast_corp():
@@ -323,7 +322,7 @@ def cast_corp():
 
 
 def cast_guard():
-    """Страховка deliver --patch: guard на удалении → «n»; патч не лёг → откат без коммита."""
+    """Страховка deliver: guard на удалении → «n»; патч не лёг → откат без коммита."""
     base, hreg, nreg, ws = fresh('gd', 'gd-hreg', 'gd-nreg', 'gd-ws')
     corp = os.path.join(base, 'corp.git')
     mdir = os.path.join(base, 'mirror.git')
@@ -366,20 +365,20 @@ def cast_guard():
 
     new_cast()
     comment('# ноут: guard показывает, что уедет в MR, удаления — отдельно', lead=0.3)
-    type_cmd('pbx deliver sup feature/SUP-8 "SUP-8: чистка" --patch --from fix/cleanup', lead=0.6)
+    type_cmd('pbx deliver sup feature/SUP-8 "SUP-8: чистка" --from fix/cleanup', lead=0.6)
     run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-8', 'SUP-8: чистка',
-             '--patch', '--from', 'fix/cleanup'],
+             '--from', 'fix/cleanup'],
             keys=[(3.8, b'n'), (0.6, b'\r')], env=nenv)
     comment('# в корп-dev уже поменяли ту же строку — патч не ляжет, откат сам')
-    type_cmd('pbx deliver sup feature/SUP-9 "SUP-9: заголовок" --patch --from fix/title')
+    type_cmd('pbx deliver sup feature/SUP-9 "SUP-9: заголовок" --from fix/title')
     run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-9', 'SUP-9: заголовок',
-             '--patch', '--from', 'fix/title'], keys=[], env=nenv)
+             '--from', 'fix/title'], keys=[], env=nenv)
     type_cmd('git status -sb', lead=1.0)
     run_pty(['git', '-C', nrepo, 'status', '-sb'], keys=[], env=GIT_ENV)
     emit(1.6, '\x1b[1;32m$\x1b[0m ')
     emit(2.6, '\r\n')
     finish_cast(os.path.join(ROOT, 'guard.cast'),
-                'deliver --patch: guard и откат без коммита')
+                'deliver: guard и откат без коммита')
 
 
 SCENARIOS = {
