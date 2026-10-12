@@ -849,7 +849,7 @@ cmd_push() {
     "PUSH_COMMIT=$sha" \
     "PUSH_SOURCE_COMMIT=$src_head"
   c_green "✅ $project: снапшот рабочего дерева ушёл в зеркало веткой '$branch' (${sha:0:7})"
-  ui_summary "$branch" "$MIRROR" "снапшот ${sha:0:7} (вкл. незакоммиченное)"
+  ui_summary "$branch" "$MIRROR" "снапшот ${sha:0:7} (вкл. незакоммиченное)" "зеркало"
   return 0
 }
 
@@ -2085,7 +2085,10 @@ cmd_deliver() {
     none) c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH' запушена (без MR/PR) — «$msg».";;
     *)    c_green "✅ $project: ветка '$branch' от '$BASE_BRANCH', MR/PR в '$TARGET_BRANCH' — «$msg».";;
   esac
-  ui_summary "$branch" "$TARGET_BRANCH" "${msg%%$'\n'*}"
+  case "$FORGE" in
+    none) ui_summary "$branch" "$BASE_BRANCH" "${msg%%$'\n'*}" "от ветки" ;;
+    *)    ui_summary "$branch" "$TARGET_BRANCH" "${msg%%$'\n'*}" ;;
+  esac
 }
 
 # ---- log: диагностика для ИИ-агента ----------------------------------------
@@ -2577,11 +2580,14 @@ ui_dim() {
   printf '  %s%s%s\n' "$C_DIM" "$*" "$C_RESET"
 }
 
-# ui_summary <ветка> <MR-цель> <сообщение> — итоговый блок доставки, только TTY.
+# ui_summary <ветка> <цель> <сообщение> [метка цели] — итоговый блок доставки, только TTY.
+# Метка по умолчанию «MR →»; push пишет «зеркало», deliver без MR — «от ветки».
 ui_summary() {
   (( UI_COLOR_OUT )) || return 0
+  local label="${4:-MR →}" pad      # printf %-10s считает байты — кириллица съезжает
+  pad=$(( 10 - ${#label} )); (( pad > 0 )) || pad=0
   printf ' %s%s%s ветка      %s\n' "$C_GREY" "$G_BAR" "$C_RESET" "$1"
-  printf ' %s%s%s MR →       %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$2"
+  printf ' %s%s%s %s%*s %s\n' "$C_GREY" "$G_MID" "$C_RESET" "$label" "$pad" "" "$2"
   printf ' %s%s%s сообщение  %s\n' "$C_GREY" "$G_END" "$C_RESET" "$3"
 }
 

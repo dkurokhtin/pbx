@@ -75,6 +75,14 @@ test_ui_helpers_plain_silent() {
   assert_eq "plain: ui_kv/ui_dim/ui_summary молчат, set -e жив" "$out" "REACHED"
 }
 
+test_ui_summary_target_label() {
+  # метка цели: по умолчанию «MR →», push — «зеркало»; кириллица выровнена по символам
+  local out
+  out="$(LC_ALL=C.utf8 bash -c 'source "'"$PBX"'"; UI_COLOR_OUT=1; C_GREY= C_RESET= G_MID=+; ui_summary b /m.git msg зеркало; ui_summary b dev msg')"
+  assert_has "summary: push пишет «зеркало», не «MR →»" "$out" "+ зеркало    /m.git"
+  assert_has "summary: метка по умолчанию — «MR →»" "$out" "+ MR →       dev"
+}
+
 test_ui_section_plain_invariant() {
   local out
   out="$(bash -c 'source "'"$PBX"'"; ui_section "Заголовок TTY" "🔵 Полная plain-строка"')"
@@ -2870,6 +2878,7 @@ test_ui_flags_nontty
 test_glyphs_ascii_fallback
 test_c_funcs_respect_flags
 test_ui_helpers_plain_silent
+test_ui_summary_target_label
 test_ui_section_plain_invariant
 test_pack_plain_invariant
 test_repo_remote_url

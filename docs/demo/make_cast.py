@@ -226,9 +226,11 @@ def cast_hero():
     git('push', '-q', 'origin', 'dev', cwd=tmp)
     comment('# тем временем в корп-dev влили чужой MR — патч его не откатит')
     comment('# ноут: только наш дифф поверх свежего dev → MR', lead=0.6)
-    type_cmd('pbx deliver sup feature/SUP-7-widget "SUP-7: виджет" --patch --from fix/widget --yes')
-    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-7-widget', 'SUP-7: виджет',
-             '--patch', '--from', 'fix/widget', '--yes'], keys=[], env=nenv)
+    # ≤ 74 символов с приглашением — иначе перенос строки в 76 колонках
+    type_cmd('pbx deliver sup feature/SUP-7 "SUP-7: виджет" --patch --from fix/widget')
+    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-7', 'SUP-7: виджет',
+             '--patch', '--from', 'fix/widget'],
+            keys=[(3.5, b'y'), (0.6, b'\r')], env=nenv)   # guard: показал дифф → «y»
     emit(1.4, '\x1b[1;32m$\x1b[0m ')
     emit(2.4, '\r\n')
     finish_cast(os.path.join(ROOT, 'hero.cast'),
