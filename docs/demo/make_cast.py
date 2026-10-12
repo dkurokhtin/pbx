@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Генерация демо-кастов pbx (asciicast v2) ЗАХВАТОМ РЕАЛЬНЫХ СЕССИЙ через pty.
 
-Пять роликов — по одному на фичу (каждый в свой раздел README):
-  hero    — меню (12 пунктов, прогулка до corp) → pack → list
+Четыре ролика — по одному на фичу (каждый в свой раздел README):
+  hero    — штатный поток Э5: snapshot (ноут) → start + push (дом) → deliver --patch (ноут)
   status  — сводка: дрейф от pack, зеркало, «SRC ушёл вперёд»
-  mirror  — Э2: pbx push (дом) → pbx deliver --mirror (ноут), без архива
   corp    — Э3: pbx snapshot (ноут) → pbx corp (дом), обе стороны
-  guard   — страховка deliver: удаления чужой работы → отказ (fail-closed)
+  guard   — страховка deliver в запасном архивном режиме: удаления чужой работы → отказ
 
 Запуск:  python3 docs/demo/make_cast.py            # все ролики → /tmp/pbx-demo/*.cast
          python3 docs/demo/make_cast.py corp guard # выборочно
@@ -180,27 +179,60 @@ def make_src_tree(ws, *projects):
 # ---------------------------------------------------------------- сценарии --
 
 def cast_hero():
-    """Меню 12 пунктов (прогулка до corp и обратно) → pack sup → list."""
-    ws, reg = fresh('hero/ws', 'hero/reg')
-    make_src_tree(ws, 'sup', 'vnd')
-    env = env_for(ws, reg)
+    """Штатный поток (Э5): snapshot (ноут) → start + push (дом) → deliver --patch (ноут)."""
+    base, hreg, nreg = fresh('flow', 'flow-hreg', 'flow-nreg')
+    corp = os.path.join(base, 'corp.git')
+    mdir = os.path.join(base, 'mirror.git')
+    nrepo = os.path.join(base, 'repo')
+    hsrc = os.path.join(base, 'src')
+    git('init', '-q', '--bare', corp, cwd=ROOT)
+    git('init', '-q', '--bare', mdir, cwd=ROOT)
+    # ноут: корп-репо на dev
+    git('init', '-q', '-b', 'dev', nrepo, cwd=ROOT)
+    with open(os.path.join(nrepo, 'app.js'), 'w') as f:
+        f.write('console.log("app v1")\n')
+    with open(os.path.join(nrepo, 'roles.js'), 'w') as f:
+        f.write('export const roles = ["admin"]\n')
+    git('add', '-A', cwd=nrepo)
+    git('commit', '-qm', 'SUP-1: база', cwd=nrepo)
+    git('remote', 'add', 'origin', corp, cwd=nrepo)
+    git('push', '-qu', 'origin', 'dev', cwd=nrepo)
+    write_conf(nreg, 'sup', REPO=nrepo, MIRROR=mdir, FORGE='none')
+    nenv = env_for(base, nreg)
+    # дом: пустой SRC-репо, ветку даст pbx start
+    git('init', '-q', hsrc, cwd=ROOT)
+    write_conf(hreg, 'sup', SRC=hsrc, MIRROR=mdir)
+    henv = env_for(base, hreg)
 
     new_cast()
-    type_cmd('pbx', lead=0.5, prompt=False)
-    run_pty(['bash', PBX], env=env, keys=[
-        (1.4, b'\x1b[B'),   # ↓ push
-        (0.55, b'\x1b[B'),  # ↓ deliver
-        (0.55, b'\x1b[B'),  # ↓ snapshot (Э3)
-        (0.55, b'\x1b[B'),  # ↓ corp (Э3)
-        (1.0, b'\x1b[A'), (0.4, b'\x1b[A'), (0.4, b'\x1b[A'), (0.4, b'\x1b[A'),
-        (0.9, b'\r'),       # Enter → выбор проекта
-        (1.3, b'\r'),       # Enter → sup (первый)
-    ])
-    type_cmd('pbx list', lead=1.1)
-    run_pty(['bash', PBX, 'list'], keys=[], env=env)
-    emit(1.2, '\x1b[1;32m$\x1b[0m ')
-    emit(2.0, '\r\n')
-    finish_cast(os.path.join(ROOT, 'hero.cast'), 'pbx — меню, pack, list')
+    comment('# ноут (видит корп-gitlab): корп-dev → corp-dev зеркала', lead=0.3)
+    type_cmd('pbx snapshot sup', lead=0.6)
+    run_pty(['bash', PBX, 'snapshot', 'sup'], keys=[], env=nenv)
+    comment('# дом: задача от свежего корпа')
+    type_cmd('pbx start sup fix/widget')
+    run_pty(['bash', PBX, 'start', 'sup', 'fix/widget'], keys=[], env=henv)
+    type_cmd('echo \'export const widget = 1\' > widget.js', lead=1.0)
+    with open(os.path.join(hsrc, 'widget.js'), 'w') as f:
+        f.write('export const widget = 1\n')
+    type_cmd('pbx push sup fix/widget')
+    run_pty(['bash', PBX, 'push', 'sup', 'fix/widget'], keys=[], env=henv)
+    # тем временем коллега влил своё в корп-dev — патч это не тронет
+    tmp = os.path.join(base, 'colleague')
+    subprocess.run(['git', 'clone', '-q', '-b', 'dev', corp, tmp], env=GIT_ENV,
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(os.path.join(tmp, 'roles.js'), 'a') as f:
+        f.write('roles.push("auditor")\n')
+    git('commit', '-qam', 'SUP-2: роль аудитора (чужой MR)', cwd=tmp)
+    git('push', '-q', 'origin', 'dev', cwd=tmp)
+    comment('# тем временем в корп-dev влили чужой MR — патч его не откатит')
+    comment('# ноут: только наш дифф поверх свежего dev → MR', lead=0.6)
+    type_cmd('pbx deliver sup feature/SUP-7-widget "SUP-7: виджет" --patch --from fix/widget --yes')
+    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-7-widget', 'SUP-7: виджет',
+             '--patch', '--from', 'fix/widget', '--yes'], keys=[], env=nenv)
+    emit(1.4, '\x1b[1;32m$\x1b[0m ')
+    emit(2.4, '\r\n')
+    finish_cast(os.path.join(ROOT, 'hero.cast'),
+                'pbx: snapshot → start → push → deliver --patch')
 
 
 def cast_status():
@@ -232,48 +264,6 @@ def cast_status():
     emit(1.4, '\x1b[1;32m$\x1b[0m ')
     emit(2.4, '\r\n')
     finish_cast(os.path.join(ROOT, 'status.cast'), 'pbx status — дрейф и зеркало')
-
-
-def cast_mirror():
-    """Э2: pbx push (дом) → pbx deliver --mirror (ноут). Архив не нужен."""
-    hsrc, hreg, mdir, gdir, nreg = fresh(
-        'm2/src', 'm2/hreg', 'm2/mirror.git', 'm2/gitlab.git', 'm2/nreg')
-    # дом: SRC-репо на фиче, широкая правка НЕ закоммичена (уедет в снапшот)
-    git('init', '-q', '-b', 'feature/SUP-7-widget', hsrc, cwd=ROOT)
-    with open(os.path.join(hsrc, 'app.js'), 'w') as f:
-        f.write('console.log("app v1")\n')
-    git('add', '-A', cwd=hsrc)
-    git('commit', '-qm', 'SUP-7: база', cwd=hsrc)
-    with open(os.path.join(hsrc, 'widget.js'), 'w') as f:
-        f.write('export const widget = () => "hi"\n')   # незакоммиченное
-    git('init', '-q', '--bare', mdir, cwd=ROOT)
-    write_conf(hreg, 'sup', SRC=hsrc, MIRROR=mdir)
-    henv = env_for(os.path.dirname(hsrc), hreg)
-    # «ноут»: корп-gitlab (bare) + рабочий клон на dev
-    git('init', '-q', '--bare', gdir, cwd=ROOT)
-    nrepo = os.path.join(ROOT, 'm2', 'repo')
-    git('init', '-q', '-b', 'dev', nrepo, cwd=ROOT)
-    with open(os.path.join(nrepo, 'app.js'), 'w') as f:
-        f.write('console.log("app v1")\n')
-    git('add', '-A', cwd=nrepo)
-    git('commit', '-qm', 'init', cwd=nrepo)
-    git('remote', 'add', 'origin', gdir, cwd=nrepo)
-    git('push', '-qu', 'origin', 'dev', cwd=nrepo)
-    write_conf(nreg, 'sup', REPO=nrepo, MIRROR=mdir, FORGE='none')
-    nenv = env_for(os.path.join(ROOT, 'm2'), nreg)
-
-    new_cast()
-    comment('# дома (gitlab не виден): рабочее дерево → личное зеркало', lead=0.3)
-    type_cmd('pbx push sup', lead=0.6)
-    run_pty(['bash', PBX, 'push', 'sup'], keys=[], env=henv)
-    comment('# рабочий ноут (видит gitlab): доставка ИЗ зеркала, без архива')
-    type_cmd('pbx deliver sup feature/SUP-7-widget "SUP-7: виджет" --mirror --yes')
-    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-7-widget',
-             'SUP-7: виджет', '--mirror', '--yes'], keys=[], env=nenv)
-    emit(1.4, '\x1b[1;32m$\x1b[0m ')
-    emit(2.4, '\r\n')
-    finish_cast(os.path.join(ROOT, 'mirror.cast'),
-                'pbx push → deliver --mirror (Э2)')
 
 
 def cast_corp():
@@ -344,7 +334,7 @@ def cast_guard():
     pbx_quiet(['pack', 'sup'], env)   # архив из УСТАРЕВШЕГО дома (без roles.js)
 
     new_cast()
-    comment('# архив собран из устаревшего дома — в dev уже влита чужая работа', lead=0.3)
+    comment('# запасной режим: архив из устаревшего дома, в dev уже влита чужая работа', lead=0.3)
     type_cmd('pbx deliver sup feature/SUP-9-fix "SUP-9: правка формы"', lead=0.6)
     run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-9-fix',
              'SUP-9: правка формы'],
@@ -358,7 +348,6 @@ def cast_guard():
 SCENARIOS = {
     'hero': cast_hero,
     'status': cast_status,
-    'mirror': cast_mirror,
     'corp': cast_corp,
     'guard': cast_guard,
 }
