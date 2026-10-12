@@ -2419,7 +2419,7 @@ cmd_help() {
     cat <<'EOF'
 pbx — доставка проектов Pybotx (WSL)
 
-  pbx pack    <проект>                          упаковать в _dist/<проект>.tar.gz
+  pbx pack    <проект>                          (запасной путь) упаковать в _dist/<проект>.tar.gz
   pbx push    <проект> [ветка]                  снапшот рабочего дерева SRC → ветка личного зеркала (MIRROR)
   pbx snapshot [проект]                         НОУТ: снимок состояния корп-репо (ветки, лог, ahead/behind) → ветка pbx/state зеркала (MIRROR)
                                                 + корп-BASE_BRANCH → ветка corp-<BASE_BRANCH> зеркала (CORP_SYNC=0 в conf — выключить)
@@ -2443,11 +2443,18 @@ pbx — доставка проектов Pybotx (WSL)
 
 Проекты: см. `pbx list`
 
-Примеры:
-  pbx pack <проект>
-  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание изменений"
-  pbx start <проект> fix/name                 # дом: задача от свежего корпа
-  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание" --patch --from fix/name
+Штатный поток (через зеркало, патч-доставка):
+  pbx snapshot <проект>                       # ноут: корп-dev → corp-dev зеркала + снимок pbx/state
+  pbx start <проект> fix/name                 # дом: ветка от corp-dev
+  pbx ctx <проект>                            # дом: вердикт готовности ok/warn/danger
+  pbx push <проект> fix/name                  # дом: снапшот → ветка зеркала
+  pbx deliver <проект> feature/SUBA-2147-fix-name "Описание" --patch --from fix/name   # ноут
+
+Запасные режимы (rsync --delete всего снимка — только если дом == корп):
+  pbx pack <проект>  +  pbx deliver <проект> <ветка> "<сообщение>"   # через архив
+  pbx deliver <проект> <ветка> "<сообщение>" --mirror               # ветка зеркала целиком
+
+Прочее:
   pbx log <проект>            # собрать диагностику после ошибки
   pbx add sup /home/me/sup
 
