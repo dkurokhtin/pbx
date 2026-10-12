@@ -5,7 +5,7 @@
   hero    — штатный поток Э5: меню pbx → snapshot (ноут) → start + push (дом) → deliver --patch (ноут)
   status  — сводка: дрейф от pack, зеркало, «SRC ушёл вперёд»
   corp    — Э3: pbx snapshot (ноут) → pbx corp (дом), обе стороны
-  guard   — страховка deliver в запасном архивном режиме: удаления чужой работы → отказ
+  guard   — страховка deliver --patch: guard на удалении → «n»; патч не лёг → откат без коммита
 
 Запуск:  python3 docs/demo/make_cast.py            # все ролики → /tmp/pbx-demo/*.cast
          python3 docs/demo/make_cast.py corp guard # выборочно
@@ -323,35 +323,63 @@ def cast_corp():
 
 
 def cast_guard():
-    """Страховка deliver: устаревший снимок → удаления чужой работы → отказ."""
-    gws, greg, gdir = fresh('g/ws', 'g/reg', 'g/origin.git')
-    make_src_tree(gws, 'sup')
-    git('init', '-q', '--bare', gdir, cwd=ROOT)
-    repo = os.path.join(ROOT, 'g', 'repo')
-    git('init', '-q', '-b', 'dev', repo, cwd=ROOT)
-    os.makedirs(os.path.join(repo, 'src'))
-    with open(os.path.join(repo, 'src', 'app.js'), 'w') as f:
-        f.write('console.log("hi from sup")\n')
-    with open(os.path.join(repo, 'roles.js'), 'w') as f:
-        f.write('// чужая влитая работа (другой MR)\n')
-    git('add', '-A', cwd=repo)
-    git('commit', '-qm', 'dev: две фичи', cwd=repo)
-    git('remote', 'add', 'origin', gdir, cwd=repo)
-    git('push', '-qu', 'origin', 'dev', cwd=repo)
-    write_conf(greg, 'sup', SRC=os.path.join(gws, 'sup'), REPO=repo, FORGE='none')
-    env = env_for(gws, greg)
-    pbx_quiet(['pack', 'sup'], env)   # архив из УСТАРЕВШЕГО дома (без roles.js)
+    """Страховка deliver --patch: guard на удалении → «n»; патч не лёг → откат без коммита."""
+    base, hreg, nreg, ws = fresh('gd', 'gd-hreg', 'gd-nreg', 'gd-ws')
+    corp = os.path.join(base, 'corp.git')
+    mdir = os.path.join(base, 'mirror.git')
+    nrepo = os.path.join(base, 'repo')
+    hsrc = os.path.join(base, 'src')
+    git('init', '-q', '--bare', corp, cwd=ROOT)
+    git('init', '-q', '--bare', mdir, cwd=ROOT)
+    git('init', '-q', '-b', 'dev', nrepo, cwd=ROOT)
+    files = {'app.js': 'export const title = "Заявки"\n',
+             'legacy.js': 'export const old = true\n'}
+    for name, body in files.items():
+        with open(os.path.join(nrepo, name), 'w') as f:
+            f.write(body)
+    git('add', '-A', cwd=nrepo)
+    git('commit', '-qm', 'SUP-1: база', cwd=nrepo)
+    git('remote', 'add', 'origin', corp, cwd=nrepo)
+    git('push', '-qu', 'origin', 'dev', cwd=nrepo)
+    write_conf(nreg, 'sup', REPO=nrepo, MIRROR=mdir, FORGE='none')
+    nenv = env_for(ws, nreg)
+    git('init', '-q', hsrc, cwd=ROOT)
+    write_conf(hreg, 'sup', SRC=hsrc, MIRROR=mdir)
+    henv = env_for(ws, hreg)
+    # тихая подготовка: snapshot → две задачи дома от corp-dev → push обеих
+    pbx_quiet(['snapshot', 'sup'], nenv)
+    pbx_quiet(['start', 'sup', 'fix/cleanup'], henv)
+    os.remove(os.path.join(hsrc, 'legacy.js'))
+    pbx_quiet(['push', 'sup', 'fix/cleanup'], henv)
+    git('checkout', '-q', '-f', '-b', 'fix/title', 'refs/remotes/pbx-mirror/corp-dev', cwd=hsrc)
+    with open(os.path.join(hsrc, 'app.js'), 'w') as f:
+        f.write('export const title = "Мои заявки"\n')
+    pbx_quiet(['push', 'sup', 'fix/title'], henv)
+    # коллега тем временем поменял ту же строку в корп-dev
+    tmp = os.path.join(base, 'colleague')
+    subprocess.run(['git', 'clone', '-q', '-b', 'dev', corp, tmp], env=GIT_ENV,
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(os.path.join(tmp, 'app.js'), 'w') as f:
+        f.write('export const title = "Заявки ЦОД"\n')
+    git('commit', '-qam', 'SUP-2: заголовок (чужой MR)', cwd=tmp)
+    git('push', '-q', 'origin', 'dev', cwd=tmp)
 
     new_cast()
-    comment('# запасной режим: архив из устаревшего дома, в dev уже влита чужая работа', lead=0.3)
-    type_cmd('pbx deliver sup feature/SUP-9-fix "SUP-9: правка формы"', lead=0.6)
-    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-9-fix',
-             'SUP-9: правка формы'],
-            keys=[(4.5, b'n'), (0.6, b'\r')], env=env)
+    comment('# ноут: guard показывает, что уедет в MR, удаления — отдельно', lead=0.3)
+    type_cmd('pbx deliver sup feature/SUP-8 "SUP-8: чистка" --patch --from fix/cleanup', lead=0.6)
+    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-8', 'SUP-8: чистка',
+             '--patch', '--from', 'fix/cleanup'],
+            keys=[(3.8, b'n'), (0.6, b'\r')], env=nenv)
+    comment('# в корп-dev уже поменяли ту же строку — патч не ляжет, откат сам')
+    type_cmd('pbx deliver sup feature/SUP-9 "SUP-9: заголовок" --patch --from fix/title')
+    run_pty(['bash', PBX, 'deliver', 'sup', 'feature/SUP-9', 'SUP-9: заголовок',
+             '--patch', '--from', 'fix/title'], keys=[], env=nenv)
+    type_cmd('git status -sb', lead=1.0)
+    run_pty(['git', '-C', nrepo, 'status', '-sb'], keys=[], env=GIT_ENV)
     emit(1.6, '\x1b[1;32m$\x1b[0m ')
     emit(2.6, '\r\n')
     finish_cast(os.path.join(ROOT, 'guard.cast'),
-                'deliver-guard — fail-closed на удалениях')
+                'deliver --patch: guard и откат без коммита')
 
 
 SCENARIOS = {

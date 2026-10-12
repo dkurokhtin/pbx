@@ -1911,6 +1911,12 @@ deliver_apply_patch() {
   return 0
 }
 
+# deliver_patch_rollback <ветка> — отказ от патч-доставки: репо на чистый
+# BASE_BRANCH, ветка доставки удалена (патч восстановим из зеркала).
+deliver_patch_rollback() {
+  git checkout -q -f "$BASE_BRANCH" 2>/dev/null && git branch -q -D "$1" 2>/dev/null
+}
+
 # ---- deliver ---------------------------------------------------------------
 # Распаковать архив в репозиторий, создать ветку от BASE_BRANCH, закоммитить и
 # запушить с созданием MR/PR в TARGET_BRANCH (по умолчанию dev; настраивается).
@@ -2059,7 +2065,11 @@ cmd_deliver() {
       local ndel; ndel="$(printf '%s\n' "$deleted" | wc -l | tr -d ' ')"
       printf '\033[1;31m%s удалений: %s\033[0m\n' "$G_NO" "$ndel" >&2
     fi
-    c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
+    if (( patch_mode )); then
+      c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (удалены в твоей ветке зеркала — проверь, что это намеренно):"
+    else
+      c_warn "⚠️  БУДУТ УДАЛЕНЫ файлы из '$BASE_BRANCH' (частая причина — устаревший снимок + rsync --delete):"
+    fi
     while IFS= read -r f; do c_warn "     - $f"; done <<< "$deleted"
   fi
   if [[ "$assume_yes" == 1 ]]; then
@@ -2068,9 +2078,15 @@ cmd_deliver() {
     local ans="" prompt="Проверь список выше. Продолжить коммит и пуш MR? [y/N] "
     if (( UI_COLOR_ERR )); then prompt=$'\033[1m'"$prompt"$'\033[0m'; fi
     read -r -p "$prompt" ans
-    [[ "$ans" =~ ^[Yy]$ ]] \
-      || die "Отменено. Ты на ветке '$branch'; проверь diff, затем откати: git checkout -f $BASE_BRANCH && git branch -D $branch"
+    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+      # Патч всегда можно снять заново из зеркала — откатываем сразу, как при конфликте.
+      (( patch_mode )) && deliver_patch_rollback "$branch" \
+        && die "Отменено. Ничего не закоммичено: ветка '$branch' удалена, репо на чистом '$BASE_BRANCH'."
+      die "Отменено. Ты на ветке '$branch'; проверь diff, затем откати: git checkout -f $BASE_BRANCH && git branch -D $branch"
+    fi
   else
+    (( patch_mode )) && deliver_patch_rollback "$branch" \
+      && die "Доставка прервана (не интерактивно, без подтверждения). Ничего не закоммичено, репо на '$BASE_BRANCH'. Если diff выше верен — повтори с --yes."
     die "Доставка прервана (не интерактивно, без подтверждения). Проверь diff выше; если всё верно — повтори с --yes."
   fi
 

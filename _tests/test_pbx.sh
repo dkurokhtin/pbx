@@ -2673,6 +2673,23 @@ test_e5_menu_start_and_patch() {
   _e5_cleanup
 }
 
+test_e5_patch_abort_rolls_back() {
+  # патч-режим без подтверждения (не TTY): прерывание = автооткат, репо на чистом dev
+  _mk_e5_fixture
+  ( cmd_snapshot proj ) >/dev/null 2>&1
+  _e5_home_start fix/x
+  ( cd "$E5_SRC" && rm roles.txt ) >/dev/null 2>&1
+  ( push_snapshot "$E5_SRC" "$E5_MIRROR" fix/x proj ) >/dev/null 2>&1
+  local out rc=0
+  out="$( ( cd "$E5_REPO" && cmd_deliver proj "feature/X-2" "отказ" --patch --from fix/x </dev/null ) 2>&1 )" || rc=$?
+  assert_eq  "patch-abort: rc=1"                      "$rc" "1"
+  assert_has "patch-abort: удаление подсвечено как наше" "$out" "удалены в твоей ветке зеркала"
+  assert_eq  "patch-abort: репо на dev"               "$(git -C "$E5_REPO" branch --show-current)" "dev"
+  assert_eq  "patch-abort: ветка удалена"             "$(git -C "$E5_REPO" branch --list feature/X-2)" ""
+  assert_eq  "patch-abort: дерево чистое"             "$(git -C "$E5_REPO" status --porcelain)" ""
+  _e5_cleanup
+}
+
 test_e5_start_without_corp_branch_dies() {
   _mk_e5_fixture
   git init -q "$E5_SRC"
@@ -3068,6 +3085,7 @@ test_e5_snapshot_corp_sync_optout
 test_e5_start_from_corp
 test_e5_start_without_corp_branch_dies
 test_e5_menu_start_and_patch
+test_e5_patch_abort_rolls_back
 test_e5_deliver_patch_e2e
 test_e5_deliver_patch_from_defaults_to_branch
 test_e5_deliver_patch_conflict_rolls_back
